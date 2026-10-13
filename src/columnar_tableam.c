@@ -3666,6 +3666,21 @@ pgcolumnar_get_relation_info(PlannerInfo *root, Oid relationObjectId,
 /* pgcolumnar.rollup_pause (#1294): read by refresh_rollup through current_setting */
 static bool pgcolumnar_rollup_pause = false;
 
+/* pgcolumnar.tier_fault_after (#1295): read by tier_partition through current_setting */
+static char *pgcolumnar_tier_fault_after = NULL;
+
+static bool
+pgcolumnar_check_tier_fault_after(char **newval, void **extra, GucSource source)
+{
+	static const char *const steps[] = {"", "export", "detach", "drop", "create", "attach", "pause"};
+
+	for (int i = 0; i < lengthof(steps); i++)
+		if (strcmp(*newval, steps[i]) == 0)
+			return true;
+	GUC_check_errdetail("Valid values are export, detach, drop, create, attach, pause, or empty.");
+	return false;
+}
+
 void
 _PG_init(void)
 {
@@ -4109,6 +4124,22 @@ _PG_init(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+
+	/*
+	 * A developer fault for pgcolumnar.tier_partition (#1295): the step named
+	 * here raises an ERROR right after it runs, so the tests can show that a
+	 * failure at every step leaves the rows exactly once. Superuser-only and
+	 * empty by default; any value but a step name is refused when set, so a typo
+	 * cannot leave a test believing it injected a fault it did not.
+	 */
+	DefineCustomStringVariable("pgcolumnar.tier_fault_after",
+							   "Developer fault: raise an error after this tier_partition step.",
+							   "One of export, detach, drop, create, attach; pause sleeps two seconds after export; empty for none.",
+							   &pgcolumnar_tier_fault_after,
+							   "",
+							   PGC_SUSET,
+							   GUC_NOT_IN_SAMPLE,
+							   pgcolumnar_check_tier_fault_after, NULL, NULL);
 
 	DefineCustomStringVariable("pgcolumnar.objstore_allowed_endpoints",
 							   "Remote endpoints the object-store module may connect to.",

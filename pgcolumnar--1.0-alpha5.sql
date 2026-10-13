@@ -2603,3 +2603,171 @@ $rb$;
 
 COMMENT ON FUNCTION pgcolumnar.rebase_rollup(regclass)
 	IS 'record a rollup''s source row groups as folded without touching the rollup, after the source was rewritten; the caller asserts the rollup is current (#1294)';
+
+-- #1295: move a cold columnar partition to Parquet in one transaction.
+CREATE FUNCTION pgcolumnar.tier_partition(partition regclass, server name, path text,
+										  lock_wait interval DEFAULT '10 seconds')
+	RETURNS bigint
+	LANGUAGE plpgsql
+	SET search_path = pg_catalog, pg_temp
+AS $tier$
+DECLARE
+	fault	text := coalesce(current_setting('pgcolumnar.tier_fault_after', true), '');
+	rel		pg_class;
+	parent	regclass;
+	bound	text;
+	fdw		name;
+	cols	text;
+	deps	text;
+	note	text;
+	acl		record;
+	moved	bigint;
+	seen	bigint;
+	callers_timeout text := current_setting('lock_timeout');
+BEGIN
+	-- A REPEATABLE READ or SERIALIZABLE snapshot predates the lock taken below, so
+	-- the export would miss rows committed in between, and DROP would take them
+	-- (#1295, measured by @jdatcmd). Under READ COMMITTED every statement here
+	-- takes a fresh snapshot, so the export sees everything the lock let finish.
+	IF current_setting('transaction_isolation') <> 'read committed' THEN
+		RAISE EXCEPTION 'tier_partition runs only at READ COMMITTED, not %',
+			upper(current_setting('transaction_isolation'))
+			USING ERRCODE = 'invalid_transaction_state',
+				  DETAIL = 'An older snapshot would export fewer rows than the partition holds, and the rest would be dropped with it.';
+	END IF;
+
+	SELECT * INTO rel FROM pg_class WHERE oid = partition;
+	IF NOT rel.relispartition THEN
+		RAISE EXCEPTION '"%" is not a partition', partition
+			USING ERRCODE = 'wrong_object_type';
+	END IF;
+	-- A partition that is not columnar is refused by export_parquet, before
+	-- anything moves; a check of its own here was measured redundant.
+	bound := pg_get_expr(rel.relpartbound, rel.oid);
+	IF bound = 'DEFAULT' THEN
+		RAISE EXCEPTION 'the DEFAULT partition "%" cannot be tiered', partition
+			USING ERRCODE = 'feature_not_supported',
+				  DETAIL = 'A foreign partition cannot take the rows no other partition accepts.';
+	END IF;
+	SELECT w.fdwname INTO fdw FROM pg_foreign_server s
+		JOIN pg_foreign_data_wrapper w ON w.oid = s.srvfdw WHERE s.srvname = server;
+	IF fdw IS NULL THEN
+		RAISE EXCEPTION 'server "%" does not exist', server USING ERRCODE = 'undefined_object';
+	ELSIF fdw <> 'pgcolumnar_parquet' THEN
+		RAISE EXCEPTION 'server "%" uses the % wrapper, not pgcolumnar_parquet', server, fdw
+			USING ERRCODE = 'wrong_object_type';
+	END IF;
+
+	SELECT i.inhparent INTO parent FROM pg_inherits i WHERE i.inhrelid = partition;
+	-- ATTACH of a foreign table is not allowed under a UNIQUE index; refused here,
+	-- before the export, rather than at step 5 with an orphan file behind it.
+	IF EXISTS (SELECT 1 FROM pg_index WHERE indrelid = parent AND (indisunique OR indisprimary)) THEN
+		RAISE EXCEPTION '"%" has a UNIQUE index or primary key, so a foreign partition cannot be attached to it', parent
+			USING ERRCODE = 'feature_not_supported';
+	END IF;
+	-- DROP would fail on a dependent, or remove it silently with CASCADE. Allowed:
+	-- the partition's own row type, TOAST table and indexes, its own constraints
+	-- other than foreign keys, its defaults, and triggers cloned from the parent,
+	-- all of which the foreign partition does not need or gets again on ATTACH.
+	SELECT string_agg(pg_describe_object(d.classid, d.objid, d.objsubid), ', ' ORDER BY 1)
+	  INTO deps
+	  FROM pg_depend d
+	 WHERE d.refclassid = 'pg_class'::regclass AND d.refobjid = partition
+	   AND NOT (d.classid = 'pg_type'::regclass
+			 OR d.classid = 'pg_attrdef'::regclass
+			 OR (d.classid = 'pg_class'::regclass AND
+				 (SELECT c.relkind FROM pg_class c WHERE c.oid = d.objid) IN ('t', 'i', 'I'))
+			 OR (d.classid = 'pg_constraint'::regclass AND EXISTS
+				 (SELECT 1 FROM pg_constraint k WHERE k.oid = d.objid
+				  AND k.conrelid = partition AND k.contype <> 'f'))
+			 OR (d.classid = 'pg_trigger'::regclass AND EXISTS
+				 (SELECT 1 FROM pg_trigger t WHERE t.oid = d.objid AND t.tgparentid <> 0)));
+	IF deps IS NOT NULL THEN
+		RAISE EXCEPTION 'other objects depend on partition "%"', partition
+			USING ERRCODE = 'dependent_objects_still_exist',
+				  DETAIL = format('Dropping the partition would fail on, or remove: %s.', deps);
+	END IF;
+	-- export_parquet overwrites an existing file without a word. A file another
+	-- foreign table in this database reads is refused; one only a failed earlier
+	-- attempt left behind is overwritten, so a retry can use the same path.
+	IF EXISTS (SELECT 1 FROM pg_foreign_table t
+			   WHERE ('path=' || path) = ANY (t.ftoptions)) THEN
+		RAISE EXCEPTION 'file "%" is read by a foreign table in this database', path
+			USING ERRCODE = 'duplicate_file';
+	END IF;
+
+	-- Every column as ATTACH will compare it: type, collation where it is not
+	-- the type's own, a stored or virtual generation expression, and NOT NULL
+	-- (#1317 review: each of collation and generation failed at ATTACH, after
+	-- the export, leaving an orphan file).
+	SELECT string_agg(format('%I %s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
+							 CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
+								  THEN ' COLLATE ' || a.attcollation::regcollation::text ELSE '' END,
+							 CASE a.attgenerated
+								  WHEN 's' THEN format(' GENERATED ALWAYS AS (%s) STORED', pg_get_expr(d.adbin, d.adrelid))
+								  WHEN 'v' THEN format(' GENERATED ALWAYS AS (%s) VIRTUAL', pg_get_expr(d.adbin, d.adrelid))
+								  ELSE '' END,
+							 CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END),
+					  ', ' ORDER BY a.attnum)
+		INTO cols FROM pg_attribute a
+		JOIN pg_type t ON t.oid = a.atttypid
+		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		WHERE a.attrelid = partition AND a.attnum > 0 AND NOT a.attisdropped;
+	note := obj_description(partition, 'pg_class');
+
+	-- Every lock this needs waits at most lock_wait: a long reader on the parent
+	-- would otherwise queue every new query behind the move's request.
+	PERFORM set_config('lock_timeout',
+					   (extract(epoch FROM lock_wait) * 1000)::bigint::text || 'ms', true);
+
+	-- Writes to the cold partition wait; reads go on.
+	EXECUTE format('LOCK TABLE %s IN SHARE MODE', partition);
+	moved := pgcolumnar.export_parquet(partition, path);
+	-- Under the lock nothing can commit to the partition, so a statement taken
+	-- now sees what the export saw. A difference is an error, never a loss.
+	EXECUTE format('SELECT count(*) FROM %s', partition) INTO seen;
+	IF seen <> moved THEN
+		RAISE EXCEPTION 'exported % rows but partition "%" holds %', moved, partition, seen
+			USING ERRCODE = 'internal_error';
+	END IF;
+	IF fault = 'export' THEN RAISE EXCEPTION 'injected fault after export'; END IF;
+	IF fault = 'pause' THEN PERFORM pg_sleep(2); END IF;
+
+	-- From here the parent is held ACCESS EXCLUSIVE until commit: catalog work only.
+	EXECUTE format('ALTER TABLE %s DETACH PARTITION %s', parent, partition);
+	IF fault = 'detach' THEN RAISE EXCEPTION 'injected fault after detach'; END IF;
+	EXECUTE format('DROP TABLE %s', partition);
+	IF fault = 'drop' THEN RAISE EXCEPTION 'injected fault after drop'; END IF;
+
+	-- regnamespace and regrole quote themselves when needed, so %s, never %I:
+	-- %I quoted them a second time (#1317 review: a schema "Tier" or an owner
+	-- "Owner X" failed after the export).
+	EXECUTE format('CREATE FOREIGN TABLE %s.%I (%s) SERVER %I OPTIONS (path %L)',
+				   rel.relnamespace::regnamespace, rel.relname, cols, server, path);
+	EXECUTE format('ALTER FOREIGN TABLE %s.%I OWNER TO %s',
+				   rel.relnamespace::regnamespace, rel.relname, rel.relowner::regrole);
+	FOR acl IN SELECT * FROM aclexplode(rel.relacl) x WHERE x.grantee <> rel.relowner LOOP
+		EXECUTE format('GRANT %s ON %s.%I TO %s%s', acl.privilege_type,
+					   rel.relnamespace::regnamespace, rel.relname,
+					   CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE acl.grantee::regrole::text END,
+					   CASE WHEN acl.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+	END LOOP;
+	IF note IS NOT NULL THEN
+		EXECUTE format('COMMENT ON FOREIGN TABLE %s.%I IS %L',
+					   rel.relnamespace::regnamespace, rel.relname, note);
+	END IF;
+	IF fault = 'create' THEN RAISE EXCEPTION 'injected fault after create'; END IF;
+	EXECUTE format('ALTER TABLE %s ATTACH PARTITION %s.%I %s',
+				   parent, rel.relnamespace::regnamespace, rel.relname, bound);
+	IF fault = 'attach' THEN RAISE EXCEPTION 'injected fault after attach'; END IF;
+	-- No ANALYZE: pgcolumnar_parquet has no AnalyzeForeignTable, so there is no
+	-- sample to take (checked on #1295).
+	-- The caller's lock_timeout again, or it would last to the end of their
+	-- transaction: set_config(..., true) is transaction-local, not call-local.
+	PERFORM set_config('lock_timeout', callers_timeout, true);
+	RETURN moved;
+END
+$tier$;
+
+COMMENT ON FUNCTION pgcolumnar.tier_partition(regclass, name, text, interval)
+	IS 'move a cold columnar partition to a Parquet file, attached in its place as a foreign partition with the same name, bounds, grants and comment, in one transaction at READ COMMITTED (#1295). Holds ACCESS EXCLUSIVE on the parent for the catalog steps; every lock waits at most lock_wait. Returns rows moved';

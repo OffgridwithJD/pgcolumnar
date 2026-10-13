@@ -67,6 +67,16 @@ psql_run "CREATE SERVER pqsrv FOREIGN DATA WRAPPER pgcolumnar_parquet;"
 psql_run "CREATE FOREIGN TABLE ft (id int, v text) SERVER pqsrv OPTIONS (path '$nope');"
 psql_run "GRANT SELECT ON ft TO t_none, t_priv;"
 
+# tier_partition (#1295) writes its file through export_parquet, so its gate is
+# export_parquet's. To reach it a role needs SELECT and, for the SHARE lock the
+# function takes first, UPDATE on the partition; both roles get them, so the
+# role gate is the only thing between them. Past the gate, the privileged role
+# writes the file and is then stopped by DETACH, which needs the parent's owner.
+psql_run "CREATE TABLE sfp_parent (k int) PARTITION BY RANGE (k);"
+psql_run "CREATE TABLE sfp_p1 PARTITION OF sfp_parent FOR VALUES FROM (0) TO (10) USING pgcolumnar;"
+psql_run "INSERT INTO sfp_parent VALUES (1);"
+psql_run "GRANT SELECT, UPDATE ON sfp_p1 TO t_none, t_priv;"
+
 run_as() {	# role sql -> combined output; SET ROLE drops to the test role in C
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 		-d "$PGC_DB" -X -v ON_ERROR_STOP=0 -c "SET ROLE $1;" -c "$2" 2>&1
@@ -89,6 +99,7 @@ entry_points=(
 	"export_parquet|write|SELECT pgcolumnar.export_parquet('imp_target'::regclass, '$out.parquet')"
 	"export_arrow|write|SELECT pgcolumnar.export_arrow('imp_target'::regclass, '$out.arrow')"
 	"parallel_export_parquet|write|SELECT pgcolumnar.parallel_export_parquet('imp_target'::regclass, '$outdir', 2)"
+	"tier_partition|write|SELECT pgcolumnar.tier_partition('sfp_p1'::regclass, 'pqsrv', '$out.parquet')"
 )
 
 declare -A listed
