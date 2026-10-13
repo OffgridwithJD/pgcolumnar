@@ -127,7 +127,7 @@ def test_writers_concurrent_aborted_and_prepared(pgc_own_db, pgc_cluster, expect
     _run(conn, "COPY (SELECT '2018-03-03'::timestamptz + g * interval '13 hours', g"
                f" FROM generate_series(1, 5200) g) TO '{path}' WITH (FORMAT text)")
     expect.num(_one(conn, f"SELECT pgcolumnar.parallel_copy('cw', '{path}', 3)"), 5200,
-               "parallel_copy's loaders, flushing into one table at once, all commit")
+               "premise: parallel_copy's loaders, flushing into one table at once, all commit")
     expect.text(_ext(conn, "cw", "ts"), _truth(conn, "cw", "ts"), "and the extent covers what they loaded")
 
     with psycopg.connect(dsn) as c:
@@ -223,7 +223,7 @@ def test_a_shrink_is_recomputed_never_guessed(pgc_own_db, expect):
     before = _ext(conn, "ex", "ts")
     retired = _one(conn, "SELECT pgcolumnar.expire('ex')")
     expect.text("yes" if (retired or 0) >= 1 else f"no ({retired})", "yes",
-                "expire retires the old row groups with the extent in place")
+                "premise: expire retires the old row groups with the extent in place")
     after = _ext(conn, "ex", "ts")
     expect.text(after, _truth(conn, "ex", "ts"), "after expire the extent is recomputed to the data that is left")
     expect.text("yes" if before != after else "no", "yes",
@@ -235,7 +235,7 @@ def test_a_shrink_is_recomputed_never_guessed(pgc_own_db, expect):
          "DELETE FROM cr WHERE v > 4200 OR v <= 650")
     rewritten = _one(conn, "SELECT pgcolumnar.compact_rewrite('cr', 0.1)")
     expect.text("yes" if (rewritten or 0) >= 1 else f"no ({rewritten})", "yes",
-                "compact_rewrite rewrites the groups the deletes thinned")
+                "premise: compact_rewrite rewrites the groups the deletes thinned")
     expect.text(_ext(conn, "cr", "ts"), _truth(conn, "cr", "ts"), "after compact_rewrite the extent is the live rows'")
 
     _run(conn, "CREATE TABLE vr (ts timestamptz, v int) USING pgcolumnar")

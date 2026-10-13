@@ -112,7 +112,7 @@ q "CREATE TABLE cw (ts timestamptz, v int) USING pgcolumnar;
    INSERT INTO cw SELECT '2026-06-01'::timestamptz + g * interval '1 s', g FROM generate_series(1, 2000) g;" >/dev/null
 q "COPY (SELECT '2020-01-01'::timestamptz + g * interval '1 day', g FROM generate_series(1, 4000) g)
    TO '$PGC_WORKDIR/cw.txt' WITH (FORMAT text);" >/dev/null
-check "parallel_copy's loaders, flushing into one table at once, all commit" \
+check "premise: parallel_copy's loaders, flushing into one table at once, all commit" \
 	"$(q "SELECT pgcolumnar.parallel_copy('cw', '$PGC_WORKDIR/cw.txt', 4);")" "4000"
 check "and the extent covers what they loaded" "$(ext cw ts)" "$(truth cw ts)"
 
@@ -190,7 +190,7 @@ q "CREATE TABLE ex (ts timestamptz, v int) USING pgcolumnar;
    INSERT INTO ex SELECT now() - interval '1 day' + g * interval '1 s', g FROM generate_series(1, 3000) g;" >/dev/null
 ex_before="$(ext ex ts)"
 retired="$(q "SELECT pgcolumnar.expire('ex');")"
-check "expire retires the old row groups with the extent in place" "$([ "${retired:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+check "premise: expire retires the old row groups with the extent in place" "$([ "${retired:-0}" -ge 1 ] && echo yes || echo no)" "yes"
 check "after expire the extent is recomputed to the data that is left" "$(ext ex ts)" "$(truth ex ts)"
 check "and it did move: the retired groups held the old minimum" \
 	"$([ "$ex_before" != "$(ext ex ts)" ] && echo yes || echo no)" "yes"
@@ -200,7 +200,7 @@ q "CREATE TABLE cr (ts timestamptz, v int) USING pgcolumnar;
    INSERT INTO cr SELECT '2026-01-01'::timestamptz + g * interval '1 min', g FROM generate_series(1, 4000) g;
    DELETE FROM cr WHERE v > 3500 OR v <= 400;" >/dev/null
 rewritten="$(q "SELECT pgcolumnar.compact_rewrite('cr', 0.1);")"
-check "compact_rewrite rewrites the groups the deletes thinned" "$([ "${rewritten:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+check "premise: compact_rewrite rewrites the groups the deletes thinned" "$([ "${rewritten:-0}" -ge 1 ] && echo yes || echo no)" "yes"
 check "after compact_rewrite the extent is the live rows'" "$(ext cr ts)" "$(truth cr ts)"
 
 q "CREATE TABLE vr (ts timestamptz, v int) USING pgcolumnar;
