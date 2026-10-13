@@ -1202,6 +1202,11 @@ SHELL_REFERENCES = {
         "matches on cannot become a hand-maintained copy that rots apart from it "
         "(#1040, where five of eight helpers had been unreadable since the pattern "
         "shipped)",
+    "test_suite_exit_trap.py":
+        "reads every suite's text and the helper library's setup function as DATA, "
+        "with its own Python reader, to find an EXIT trap that replaces the one setup "
+        "arms (#1321). It never sources or executes either: the rule is about what "
+        "the shell text says, so the text is the only place to read it",
 }
 
 _SHELL_NAMES = re.compile(
