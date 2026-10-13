@@ -490,6 +490,7 @@ partition whose whole range is older than a cutoff. It does not run them, becaus
 its own statement, for example with psql's `\gexec`:
 
 ```sql
+\set ON_ERROR_STOP on
 SELECT * FROM pgcolumnar.partition_drop_plan('metrics', now() - interval '90 days') \gexec
 ```
 
@@ -503,6 +504,11 @@ kept.
 If a concurrent detach was interrupted, the partition stays pending. The next
 plan finishes that detach with `DETACH PARTITION ... FINALIZE` instead of starting
 it again.
+
+The drop refuses while its partition is still attached (`55000`). So if a detach
+fails, for example on a lock timeout, the drop after it does not lock the parent
+or remove the partition. A later plan retries it. `ON_ERROR_STOP` stops the run
+at the first failure, which also keeps the plan's other statements from running.
 
 The cutoff must have the key's type. A `timestamptz` key takes a `timestamptz`
 cutoff, as in the example. A `timestamp` key takes a `timestamp` cutoff, such

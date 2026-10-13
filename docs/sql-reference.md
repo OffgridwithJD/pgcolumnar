@@ -626,8 +626,11 @@ refused before it creates any (`22023`). The function takes
 
 Returns the statements that retire every partition of `parent` whose upper bound
 is at or before `cutoff`, in range order. Each partition gets
-`ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`, then `DROP TABLE`, or `DROP FOREIGN TABLE` for a partition `tier_partition` moved to
-Parquet (the file stays). A partition that an interrupted concurrent detach
+`ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`, then a `DO` block that runs
+`DROP TABLE`, or `DROP FOREIGN TABLE` for a partition `tier_partition` moved to
+Parquet (the file stays). The block refuses (`55000`) while the partition is
+still attached, so a failed detach is never followed by a drop that locks the
+parent. A partition that an interrupted concurrent detach
 left pending gets `DETACH PARTITION ... FINALIZE` instead. A partition that is
 itself partitioned is listed whole. The names are schema-qualified. The
 function runs nothing: run each statement at top level, for example with

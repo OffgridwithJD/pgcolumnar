@@ -260,6 +260,28 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
     def q(name):
         return f"{schema}.{name}"
 
+    def gdrop(kind, name):
+        """The drop the plan gives a partition: a DO block that refuses (55000)
+        while it is still attached, so a failed DETACH is never followed by a DROP
+        that locks the parent (#1331 review)."""
+        lit = "'" + name.replace("'", "''") + "'"
+        return ("DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits"
+                f" WHERE inhrelid = {lit}::regclass) THEN RAISE EXCEPTION '% is still attached to its parent;"
+                f" its DETACH did not finish', {lit} USING ERRCODE = '55000'; END IF; DROP {kind} {name};"
+                " END $pgcolumnar_drop$")
+
+    def sqlstate_with(sql, setup=None):
+        """'ok', or the SQLSTATE the statement failed with, in its own session."""
+        try:
+            with psycopg.connect(dsn, autocommit=True) as c:
+                c.execute(f"SET search_path TO {schema}")
+                if setup:
+                    c.execute(setup)
+                c.execute(sql)
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate
+
     def sqlstate(sql):
         try:
             with psycopg.connect(dsn, autocommit=True) as c:
@@ -284,10 +306,10 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
 
     want = []
     for i in range(3):
-        want += [f"ALTER TABLE {q('xl')} DETACH PARTITION {q(f'xl_w{i}')} CONCURRENTLY", f"DROP TABLE {q(f'xl_w{i}')}"]
+        want += [f"ALTER TABLE {q('xl')} DETACH PARTITION {q(f'xl_w{i}')} CONCURRENTLY", gdrop("TABLE", q(f"xl_w{i}"))]
     expect.text("\n".join(plan("xl", "2019-03-28 12:00+00")), "\n".join(want),
                 "the plan retires the partitions wholly before the cutoff, in range order")
-    expect.num(sum(1 for s in plan("xl", "2019-03-18 00:00+00") if s.startswith("DROP")), 2,
+    expect.num(sum(1 for s in plan("xl", "2019-03-18 00:00+00") if s.startswith("DO ")), 2,
                "a cutoff on a partition's upper bound includes it")
     expect.num(len(plan("xl", "2018-12-31 00:00+00")), 0, "a cutoff before every partition plans nothing")
 
@@ -305,7 +327,8 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
     expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.storage WHERE storage_id = ANY (%s)" % (
                    "ARRAY[" + ",".join(str(s) for s in sids) + "]::bigint[]")), 0,
                "and the dropped partitions' pgcolumnar storage rows are gone")
-    expect.num(len(plan("xl", "2019-03-28 12:00+00")), 0, "premise: a second plan for the same cutoff is empty")
+    expect.text(f"{len(plan('xl', '2019-03-28 12:00+00'))}|{_kids(conn, 'xl')}", "0|2",
+                "a second plan for the same cutoff is empty, and the partitions it kept are still attached")
 
     # The cutoff's type must be the key's: a timestamp key with a timestamp cutoff
     # plans the same in every session, and a cutoff of the other type is refused.
@@ -320,7 +343,7 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
             c.execute(f"SET TimeZone = '{zone}'")
             got.append(c.execute("SELECT coalesce(string_agg(s, ';'), 'none')"
                                  " FROM pgcolumnar.partition_drop_plan('xw', '2019-05-01 06:00'::timestamp) s").fetchone()[0])
-    one = f"ALTER TABLE {q('xw')} DETACH PARTITION {q('xw_a')} CONCURRENTLY;DROP TABLE {q('xw_a')}"
+    one = f"ALTER TABLE {q('xw')} DETACH PARTITION {q('xw_a')} CONCURRENTLY;" + gdrop("TABLE", q("xw_a"))
     expect.text("|".join(got), f"{one}|{one}",
                 "a timestamp key's plan for a timestamp cutoff is the same from sessions west and east of UTC")
     expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xw', '2019-05-01 06:00+00'::timestamptz)") + "|"
@@ -332,9 +355,9 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
         cur.execute("CREATE TABLE xm (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
         cur.execute("CREATE TABLE xm_lo PARTITION OF xm FOR VALUES FROM (MINVALUE) TO ('2019-07-01 00:00+00') USING pgcolumnar")
         cur.execute("CREATE TABLE xm_hi PARTITION OF xm FOR VALUES FROM ('2019-07-01 00:00+00') TO (MAXVALUE) USING pgcolumnar")
-    lo = [s for s in plan("xm", "2019-07-01 00:00+00") if s.startswith("DROP")]
+    lo = [s for s in plan("xm", "2019-07-01 00:00+00") if s.startswith("DO ")]
     hi = [s for s in plan("xm", "infinity") if "xm_hi" in s]
-    expect.text(f"{';'.join(lo)}|{len(hi)}", f"DROP TABLE {q('xm_lo')}|0",
+    expect.text(f"{';'.join(lo)}|{len(hi)}", gdrop("TABLE", q("xm_lo")) + "|0",
                 "a partition from MINVALUE is listed once its upper bound is past, one to MAXVALUE never")
 
     # Names that need quoting, in a schema that needs quoting.
@@ -366,7 +389,7 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
                     " USING pgcolumnar")
         cur.execute("INSERT INTO xs SELECT '2019-01-01 00:00+00'::timestamptz + g * interval '1 day' FROM generate_series(0, 364) g")
     expect.text(";".join(plan("xs", "2019-07-01 00:00+00")),
-                f"ALTER TABLE {q('xs')} DETACH PARTITION {q('xs_h1')} CONCURRENTLY;DROP TABLE {q('xs_h1')}",
+                f"ALTER TABLE {q('xs')} DETACH PARTITION {q('xs_h1')} CONCURRENTLY;" + gdrop("TABLE", q("xs_h1")),
                 "a partition that is itself partitioned is planned whole")
     run(plan("xs", "2019-07-01 00:00+00"))
     gone = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
@@ -390,7 +413,7 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
         expect.text(f"{moved}|{kind}", "372|f", "premise: the January partition was tiered to Parquet")
         tiered = plan("xt", "2019-02-01 00:00+00")
         expect.text(";".join(tiered),
-                    f"ALTER TABLE {q('xt')} DETACH PARTITION {q('xt_jan')} CONCURRENTLY;DROP FOREIGN TABLE {q('xt_jan')}",
+                    f"ALTER TABLE {q('xt')} DETACH PARTITION {q('xt_jan')} CONCURRENTLY;" + gdrop("FOREIGN TABLE", q("xt_jan")),
                     "a tiered partition is planned with DROP FOREIGN TABLE")
         run(tiered)
         left = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
@@ -422,12 +445,30 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
                 "True", "premise: the interrupted detach left the partition pending")
     pending_plan = plan("xp", "2019-06-08 00:00+00")
     expect.text(";".join(pending_plan),
-                f"ALTER TABLE {q('xp')} DETACH PARTITION {q('xp_1')} FINALIZE;DROP TABLE {q('xp_1')}",
+                f"ALTER TABLE {q('xp')} DETACH PARTITION {q('xp_1')} FINALIZE;" + gdrop("TABLE", q("xp_1")),
                 "a pending detach is finalised, not started again")
     run(pending_plan)
     gone = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
                       f" WHERE n.nspname = '{schema}' AND c.relname = 'xp_1'")
     expect.text(f"{gone}|{_kids(conn, 'xp')}", "0|1", "and running it drops the pending partition")
+
+    # A DETACH that fails on the parent's lock, and then the rest of the plan once
+    # the lock is gone: the DROP must refuse, and the partition stay attached.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xf (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xf_1 PARTITION OF xf FOR VALUES FROM ('2019-09-01 00:00+00') TO ('2019-09-08 00:00+00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xf_2 PARTITION OF xf FOR VALUES FROM ('2019-09-08 00:00+00') TO ('2019-09-15 00:00+00') USING pgcolumnar")
+    detach, drop = plan("xf", "2019-09-08 00:00+00")
+    states = []
+    with psycopg.connect(dsn) as holder:
+        holder.execute(f"SET search_path TO {schema}")
+        holder.execute("LOCK TABLE xf IN SHARE UPDATE EXCLUSIVE MODE")
+        states.append(sqlstate_with(detach, "SET lock_timeout = '1500ms'"))
+        holder.rollback()
+    states.append(sqlstate_with(drop))
+    attached = _one(conn, "SELECT count(*) FROM pg_inherits WHERE inhrelid = 'xf_1'::regclass")
+    expect.text(f"{';'.join(states)}|{_kids(conn, 'xf')}|{attached}", "55P03;55000|2|1",
+                "after a DETACH that fails, the plan's DROP refuses and the partition stays attached")
 
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE xd (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
