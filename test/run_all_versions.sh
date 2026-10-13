@@ -46,6 +46,7 @@ SUITES=(
 	analyze_function
 	analyze_reltuples
 	analyze_stats
+	approx_aggregates
 	arrow_export
 	arrow_import
 	arrow_nested

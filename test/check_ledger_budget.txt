@@ -1332,4 +1332,19 @@ suites_not_covered 247
 #     never         1694 +  6 = 1700
 #     dated          251 + 21 =  272
 #     1700 + 272 == 1972
-checks_never_observed_red 1700
+#
+# #1296 phase 2 (approx_aggregates): 1700 -> 1705. The hll and tdigest
+# compatibility suite enters with 12 checks from five-major runs on this tree,
+# so it is covered and suites_not_covered stays 247. Seven are dated by two
+# mutations, each merged one log at a time with --mutation and --target: the
+# custom scan off by default; and that plus the access-method scan dropping
+# every row numbered ...999. The five still never are premises: the two
+# extensions are installed, and their answers sit inside their own documented
+# error. On PG19 the six hll checks are named skips (hll 2.19 does not build
+# there); the majors column records 19 for them as it does for other skips.
+#
+#     ledger rows   1972 + 12 = 1984
+#     never         1700 +  5 = 1705
+#     dated          272 +  7 =  279
+#     1705 + 279 == 1984
+checks_never_observed_red 1705

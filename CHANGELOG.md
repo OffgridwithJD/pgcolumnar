@@ -18,6 +18,18 @@ true until the next version shipped.
 
 ### Added
 
+- Approximate distinct counts and percentiles over columnar tables are tested
+  with the `hll` and `tdigest` extensions (#1296 phase 2), and a how-to section
+  states the tested versions: hll 2.19 on PostgreSQL 15 to 18 (it does not build
+  against 19) and tdigest 1.4.3 on 15 to 19. Over a columnar table each gives
+  exactly what it gives over heap, the hll sketch byte for byte, and both read
+  through the columnar scan; both sketch types round-trip through columnar
+  storage. `test/approx_aggregates.sh` and an independent
+  `test_approx_aggregates.py`; CI installs both extensions from PGDG. The first
+  draft built its heap mirror by copying the columnar table, so a scan that lost
+  rows lost them on both sides and every equality stayed green under a mutation
+  dropping one row in a thousand; the mirror is now written from the generator.
+
 - `test/format_downgrade.sh` and `test_format_downgrade.py` test #1137's promise
   with both real libraries. They build `v1.0-alpha4`, write with it, upgrade to the
   tree under test, write again, and then put the alpha4 library back under the

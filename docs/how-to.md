@@ -354,7 +354,36 @@ partitions, before it creates any. Use a wider width or a shorter lead.
 `test/partition_lifecycle.sh` checks each of these statements, in sessions
 west and east of UTC.
 
-## Manage time partitions with pg_partman
+## Count distinct values and percentiles approximately
+
+For large tables, approximate distinct counts and percentiles cost far less than
+exact ones. Two PostgreSQL extensions provide them, and both work on columnar
+tables without anything from pgColumnar: `hll` (HyperLogLog) for distinct counts
+and `tdigest` for percentiles.
+
+Before you start: install the extensions for your PostgreSQL major. PGDG ships
+them as `postgresql-N-hll` and `postgresql-N-tdigest`. Tested with hll 2.19 on
+PostgreSQL 15 to 18 and tdigest 1.4.3 on PostgreSQL 15 to 19. hll 2.19 does not
+build against PostgreSQL 19.
+
+```sql
+CREATE EXTENSION hll;
+CREATE EXTENSION tdigest;
+
+SELECT hll_cardinality(hll_add_agg(hll_hash_integer(device_id))) FROM readings;
+SELECT tdigest_percentile(v, 100, 0.99) FROM readings;
+```
+
+Over a columnar table, each gives exactly what it gives over the same rows in a
+heap table. Both read through the columnar scan, and read only the column they
+aggregate. Their error against the exact answer is the extension's own. For `hll`
+at its default precision, one standard error is about 2.3%. For `tdigest` at
+compression 100, the 99th percentile is well within 0.1%.
+
+Both sketch types can be stored in a columnar table, for example one sketch per
+day. A stored `hll` comes back byte for byte, so `hll_union_agg` over the daily
+sketches counts what one sketch over all the rows counts.
+
 
 pg_partman can create and drop columnar partitions. It needs one setting to do
 so, and without it the partitions it makes are not columnar.

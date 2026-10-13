@@ -52,3 +52,6 @@
 16 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns
 17 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns
 18 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns
+# hll 2.19 does not build against PostgreSQL 19 (FuncnameGetCandidates gained an
+# argument), so the hll half of #1296's compatibility test is UNSUPPORTED_MAJOR there.
+19 test_approx_aggregates.py::test_hll_over_columnar
