@@ -553,8 +553,10 @@ every row is stored exactly once.
 **A failed attempt leaves its file behind.** A transaction cannot remove a file
 that it wrote. You can retry with the same `path`: the function overwrites a
 file that no foreign table in the database reads. It refuses a `path` that a
-foreign table in this database reads (`58P02`). It cannot see readers outside
-the database, so do not reuse a path that another system reads.
+foreign table in this database reads (`58P02`). The check compares the text of
+the path, so the same file spelled another way, for example through a symbolic
+link, is not recognised. It also cannot see readers outside the database, so do
+not reuse a path that another system reads.
 
 The function refuses these partitions before it moves anything:
 

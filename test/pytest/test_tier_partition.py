@@ -411,6 +411,60 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
     expect.num(lt_moved, mar, "the move ran inside the caller's transaction")
     expect.text(lt, "13s", "after the move the caller's lock_timeout is the caller's again")
 
+    # Names and columns the foreign table must reproduce (#1317 review): each
+    # failed after the export in the first version. Each moves a small partition,
+    # which must then read back the same through its parent.
+    def mini(t, extra=""):
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {t} (at timestamptz NOT NULL, reading int{extra}) PARTITION BY RANGE (at)")
+            cur.execute(f"CREATE TABLE {t}_mar PARTITION OF {t} FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')"
+                        " USING pgcolumnar")
+            cur.execute(f"INSERT INTO {t} (at, reading) SELECT '2026-03-01'::timestamptz + g * interval '5 h', g * 7"
+                        " FROM generate_series(0, 119) g")
+
+    def moved_reads(t, cols):
+        before = _one(conn, f"SELECT md5(string_agg({cols}, ',' ORDER BY at)) FROM {t}")
+        try:
+            moved = str(_one(conn, f"SELECT pgcolumnar.tier_partition('{t}_mar', 'tq', '{server_dir}/{t.replace(chr(34), '').replace(' ', '_').replace('.', '_')}.parquet')"))
+        except psycopg.Error as e:
+            moved = e.sqlstate or "?"
+        after = _one(conn, f"SELECT md5(string_agg({cols}, ',' ORDER BY at)) FROM {t}")
+        kind = _one(conn, f"SELECT relkind::text FROM pg_class WHERE oid = '{t}_mar'::regclass")
+        return f"{moved}|{kind}|{'same' if before and before == after else 'differs'}"
+
+    with conn.cursor() as cur:
+        cur.execute('CREATE SCHEMA "Cold Store"')
+    mini('"Cold Store".cs')
+    expect.text(moved_reads('"Cold Store".cs', "at::text || reading"), "120|f|same",
+                "a partition in a schema whose name needs quoting moves and reads back the same")
+    with conn.cursor() as cur:
+        cur.execute('DO $$ BEGIN CREATE ROLE "Archive Owner"; EXCEPTION WHEN duplicate_object THEN NULL; END $$')
+    mini("co")
+    with conn.cursor() as cur:
+        cur.execute('ALTER TABLE co_mar OWNER TO "Archive Owner"')
+    expect.text(f"{moved_reads('co', 'at::text || reading')}|"
+                f"{_one(conn, 'SELECT relowner::regrole::text FROM pg_class WHERE oid = ' + repr('co_mar') + '::regclass')}",
+                '120|f|same|"Archive Owner"',
+                "a partition owned by a role whose name needs quoting moves, and keeps that owner")
+    with conn.cursor() as cur:
+        cur.execute('DO $$ BEGIN CREATE ROLE "Audit Reader"; EXCEPTION WHEN duplicate_object THEN NULL; END $$')
+    mini("cg")
+    with conn.cursor() as cur:
+        cur.execute('GRANT SELECT ON cg_mar TO "Audit Reader"')
+    expect.text(f"{moved_reads('cg', 'at::text || reading')}|"
+                f"{_one(conn, 'SELECT has_table_privilege(' + repr('Audit Reader') + ', ' + repr('cg_mar') + ', ' + repr('SELECT') + ')')}",
+                "120|f|same|True", "a grant to a role whose name needs quoting is carried to the foreign partition")
+    with conn.cursor() as cur:
+        cur.execute('REVOKE ALL ON cg_mar FROM "Audit Reader"')
+    mini("cc", ', label text COLLATE "C"')
+    with conn.cursor() as cur:
+        cur.execute("UPDATE cc SET label = 'L' || reading")
+    expect.text(moved_reads("cc", "at::text || reading || label"), "120|f|same",
+                "a column with its own collation moves and reads back the same")
+    mini("cs2", ", doubled int GENERATED ALWAYS AS (reading * 2) STORED")
+    expect.text(moved_reads("cs2", "at::text || reading || doubled"), "120|f|same",
+                "a stored generated column moves and reads back the same")
+
     # 5. A retry over the file a failed attempt left.
     _build(conn, "again")
     ab = _digest(conn, "again")
@@ -429,3 +483,30 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
         retried = f"error {e.sqlstate}"
     expect.text(f"{retried}|{_digest(conn, 'again')}|{_relkind(conn, 'again')}",
                 f"{mar}|{ab}|f", "a retry over the failed attempt's file moves the partition, exactly once")
+
+
+def test_tier_partition_moves_a_virtual_generated_column(pgc_own_db, server_dir, expect):
+    """PostgreSQL 18's virtual generated columns: the foreign table declares the
+    same expression, and the moved rows read back the same (#1317 review)."""
+    conn = pgc_own_db
+    major = int(_one(conn, "SHOW server_version_num")) // 10000
+    if major < 18:
+        expect.cannot_run(
+            "UNSUPPORTED_MAJOR",
+            f"virtual generated columns arrived in PostgreSQL 18; this server is {major}",
+            name="a virtual generated column moves and reads back the same")
+        return
+    with conn.cursor() as cur:
+        cur.execute("CREATE SERVER tq FOREIGN DATA WRAPPER pgcolumnar_parquet")
+        cur.execute("CREATE TABLE cv (at timestamptz NOT NULL, reading int,"
+                    " tripled int GENERATED ALWAYS AS (reading * 3) VIRTUAL) PARTITION BY RANGE (at)")
+        cur.execute("CREATE TABLE cv_mar PARTITION OF cv FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')"
+                    " USING pgcolumnar")
+        cur.execute("INSERT INTO cv (at, reading) SELECT '2026-03-01'::timestamptz + g * interval '9 h', g"
+                    " FROM generate_series(0, 70) g")
+    digest = "SELECT md5(string_agg(at::text || reading || tripled, ',' ORDER BY at)) FROM cv"
+    before = _one(conn, digest)
+    moved = _one(conn, f"SELECT pgcolumnar.tier_partition('cv_mar', 'tq', '{server_dir}/cv.parquet')")
+    kind = _one(conn, "SELECT relkind::text FROM pg_class WHERE oid = 'cv_mar'::regclass")
+    expect.text(f"{moved}|{kind}|{'same' if before and before == _one(conn, digest) else 'differs'}",
+                "71|f|same", "a virtual generated column moves and reads back the same")

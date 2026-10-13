@@ -2696,10 +2696,22 @@ BEGIN
 			USING ERRCODE = 'duplicate_file';
 	END IF;
 
-	SELECT string_agg(format('%I %s%s', a.attname, format_type(a.atttypid, a.atttypmod),
+	-- Every column as ATTACH will compare it: type, collation where it is not
+	-- the type's own, a stored or virtual generation expression, and NOT NULL
+	-- (#1317 review: each of collation and generation failed at ATTACH, after
+	-- the export, leaving an orphan file).
+	SELECT string_agg(format('%I %s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
+							 CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
+								  THEN ' COLLATE ' || a.attcollation::regcollation::text ELSE '' END,
+							 CASE a.attgenerated
+								  WHEN 's' THEN format(' GENERATED ALWAYS AS (%s) STORED', pg_get_expr(d.adbin, d.adrelid))
+								  WHEN 'v' THEN format(' GENERATED ALWAYS AS (%s) VIRTUAL', pg_get_expr(d.adbin, d.adrelid))
+								  ELSE '' END,
 							 CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END),
 					  ', ' ORDER BY a.attnum)
 		INTO cols FROM pg_attribute a
+		JOIN pg_type t ON t.oid = a.atttypid
+		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 		WHERE a.attrelid = partition AND a.attnum > 0 AND NOT a.attisdropped;
 	note := obj_description(partition, 'pg_class');
 
@@ -2727,22 +2739,25 @@ BEGIN
 	EXECUTE format('DROP TABLE %s', partition);
 	IF fault = 'drop' THEN RAISE EXCEPTION 'injected fault after drop'; END IF;
 
-	EXECUTE format('CREATE FOREIGN TABLE %I.%I (%s) SERVER %I OPTIONS (path %L)',
+	-- regnamespace and regrole quote themselves when needed, so %s, never %I:
+	-- %I quoted them a second time (#1317 review: a schema "Tier" or an owner
+	-- "Owner X" failed after the export).
+	EXECUTE format('CREATE FOREIGN TABLE %s.%I (%s) SERVER %I OPTIONS (path %L)',
 				   rel.relnamespace::regnamespace, rel.relname, cols, server, path);
-	EXECUTE format('ALTER FOREIGN TABLE %I.%I OWNER TO %I',
+	EXECUTE format('ALTER FOREIGN TABLE %s.%I OWNER TO %s',
 				   rel.relnamespace::regnamespace, rel.relname, rel.relowner::regrole);
 	FOR acl IN SELECT * FROM aclexplode(rel.relacl) x WHERE x.grantee <> rel.relowner LOOP
-		EXECUTE format('GRANT %s ON %I.%I TO %s%s', acl.privilege_type,
+		EXECUTE format('GRANT %s ON %s.%I TO %s%s', acl.privilege_type,
 					   rel.relnamespace::regnamespace, rel.relname,
-					   CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(acl.grantee::regrole::text) END,
+					   CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE acl.grantee::regrole::text END,
 					   CASE WHEN acl.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
 	END LOOP;
 	IF note IS NOT NULL THEN
-		EXECUTE format('COMMENT ON FOREIGN TABLE %I.%I IS %L',
+		EXECUTE format('COMMENT ON FOREIGN TABLE %s.%I IS %L',
 					   rel.relnamespace::regnamespace, rel.relname, note);
 	END IF;
 	IF fault = 'create' THEN RAISE EXCEPTION 'injected fault after create'; END IF;
-	EXECUTE format('ALTER TABLE %s ATTACH PARTITION %I.%I %s',
+	EXECUTE format('ALTER TABLE %s ATTACH PARTITION %s.%I %s',
 				   parent, rel.relnamespace::regnamespace, rel.relname, bound);
 	IF fault = 'attach' THEN RAISE EXCEPTION 'injected fault after attach'; END IF;
 	-- No ANALYZE: pgcolumnar_parquet has no AnalyzeForeignTable, so there is no
