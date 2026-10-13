@@ -4823,11 +4823,18 @@ PgColumnarForgetColumnOrdering(uint64 storageId, int columnIndex)
 	if (PgColumnarExtentCatalogPresent())
 	{
 		ListCell   *lc;
+		Snapshot	snap;
 
+		/*
+		 * Registered: PG18 asserts that a snapshot used for a heap scan is
+		 * registered or active, and an assert build aborts on an unregistered
+		 * one (measured: every collation change crashed on 18 and 19).
+		 */
 		CommandCounterIncrement();
-		foreach(lc, PgColumnarReadExtentRows(storageId, columnIndex,
-											 GetLatestSnapshot()))
+		snap = RegisterSnapshot(GetLatestSnapshot());
+		foreach(lc, PgColumnarReadExtentRows(storageId, columnIndex, snap))
 			PgColumnarDeleteExtentRow(&((NativeExtentRow *) lfirst(lc))->tid);
+		UnregisterSnapshot(snap);
 	}
 	CommandCounterIncrement();
 }
