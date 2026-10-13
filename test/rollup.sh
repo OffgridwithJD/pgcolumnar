@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# Incremental rollups, phase 1: append-only (#1294).
+#
+# WRITTEN BEFORE THE CODE, against the API proposed on #1294:
+#
+#     pgcolumnar.create_rollup(rollup, source, ts_column, width, origin,
+#                              group_by name[], aggregates text[])
+#     pgcolumnar.refresh_rollup(rollup) -> rows folded
+#
+# The rollup is a table, one row per (bucket, group_by...) key, with columns
+# `bucket`, the group_by columns, then one per aggregate named `count`, or
+# <function>_<column> (sum_v, min_v, max_v, avg_f).
+#
+# THE ORACLE is a full recompute of the same GROUP BY over the source, every
+# time. Exactness is fixed by the design on #1294 so it cannot be loosened here:
+# count, integer sum, min and max exact; avg of float8 within a relative 1e-12.
+#
+# A refresh is one statement and so one snapshot: rows committed while it runs
+# are neither folded nor recorded, and the next refresh takes them, exactly once
+# (pgcolumnar.rollup_pause, a developer setting, holds it open for that arm).
+# Phase 1 refuses any change but appends, until phase 2's dirty buckets.
+#
+# Usage:  test/rollup.sh [PG_CONFIG]
+
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
+
+at_least() { [ -z "$1" ] && return; [ "$1" -lt "$2" ] && echo "$1" || echo "$2"; }
+sqlstate() {	# sqlstate SQL -> the SQLSTATE it fails with, or ok
+	local out
+	out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "$1" 2>&1 >/dev/null)
+	[ -z "$out" ] && { echo ok; return; }
+	echo "$out" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+
+q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
+check_num "premise: the rollup functions exist" \
+	"$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+	      WHERE n.nspname = 'pgcolumnar' AND p.proname IN ('create_rollup', 'refresh_rollup');")" "2"
+
+ORIGIN="2026-01-01 00:00:00+00"
+q "CREATE TABLE src (ts timestamptz, dev int, v bigint, f float8) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('src', stripe_row_limit => 4000);" >/dev/null
+load() {	# load FROM TO START-TS: rows g in [FROM, TO], 37 s apart from START-TS
+	# bigint: g * 104729 overflows int past g = 20,505, the INSERT then fails, and
+	# every arm below would measure an empty table (the first red run did).
+	q "INSERT INTO src SELECT '$3'::timestamptz + (g - $1) * interval '37 s', g % 7, (g * 7919) % 100003,
+	   ((g * 104729) % 9973) / 13.0 FROM generate_series($1::bigint, $2) g;" >/dev/null
+}
+load 1 30000 "2026-03-01 00:00:00+00"
+check_num "premise: the source holds every row" "$(q "SELECT count(*) FROM src;")" "30000"
+
+# The oracle, and the rollup read the same way: exact columns hashed, avg kept apart.
+RECOMPUTE="SELECT date_bin('1 hour', ts, '$ORIGIN') AS bucket, dev, count(*) AS count,
+           sum(v)::numeric AS sum_v, min(v) AS min_v, max(v) AS max_v, avg(f) AS avg_f
+           FROM src GROUP BY 1, 2"
+exact() { q "SELECT count(*) || '|' || md5(string_agg(bucket || ',' || dev || ',' || count || ',' || sum_v
+             || ',' || min_v || ',' || max_v, ';' ORDER BY bucket, dev)) FROM ($1) x;"; }
+# the worst relative difference of avg_f between the rollup and the recompute
+avg_gap() {
+	q "SELECT coalesce(max(abs(r.avg_f - o.avg_f) / greatest(abs(o.avg_f), 1e-300)), 0) < 1e-12
+	   AND count(*) = (SELECT count(*) FROM ($RECOMPUTE) z)
+	   FROM r_hourly r JOIN ($RECOMPUTE) o USING (bucket, dev);"
+}
+matches() { echo "$(exact "SELECT * FROM r_hourly")|$(avg_gap)"; }
+oracle() { echo "$(exact "$RECOMPUTE")|t"; }
+
+q "SELECT pgcolumnar.create_rollup('r_hourly', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}',
+   '{count(*), sum(v), min(v), max(v), avg(f)}');" >/dev/null
+check "premise: the rollup table exists with the documented columns" \
+	"$(q "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+	      WHERE attrelid = to_regclass('r_hourly') AND attnum > 0 AND NOT attisdropped;")" \
+	"bucket,dev,count,sum_v,min_v,max_v,avg_f"
+
+check_num "the first refresh folds every row" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "30000"
+check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check_num "a refresh with nothing new folds nothing" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "0"
+check "and leaves the rollup as it was" "$(matches)" "$(oracle)"
+
+# Appends, including late data: rows whose timestamps land in buckets the rollup
+# already has. A time watermark would never see them.
+load 30001 33000 "2026-03-13 08:00:00+00"
+load 33001 34500 "2026-03-02 05:00:00+00"
+check_num "a refresh after appends folds exactly the appended rows, late ones included" \
+	"$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "4500"
+check "and the rollup still equals a full recompute" "$(matches)" "$(oracle)"
+
+# Rows committed while a refresh runs: not in its snapshot, so the NEXT refresh
+# folds them, once.
+load 34501 35000 "2026-03-14 00:00:00+00"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	-c "SET pgcolumnar.rollup_pause = on" -c "SELECT 'folded=' || pgcolumnar.refresh_rollup('r_hourly')" \
+	> "$PGC_WORKDIR/paused.out" 2>&1 &
+refresher=$!
+sleep 1
+load 35001 35300 "2026-03-14 06:00:00+00"
+wait "$refresher"
+check "premise: the paused refresh folded what was there before it began" \
+	"$(sed -n 's/^folded=//p' "$PGC_WORKDIR/paused.out")" "500"
+check_num "the next refresh folds the rows committed during the last one, once" \
+	"$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "300"
+check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+
+# Two refreshes at once: the second waits for the first, then has nothing to fold.
+load 35301 37300 "2026-03-15 00:00:00+00"
+for i in 1 2; do
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-c "SELECT pgcolumnar.refresh_rollup('r_hourly')" > "$PGC_WORKDIR/both_$i.out" 2>&1 &
+done
+wait
+check "two refreshes started together fold the new rows once between them" \
+	"$(cat "$PGC_WORKDIR/both_1.out" "$PGC_WORKDIR/both_2.out" | sort -n | tr '\n' ' ')" "0 2000 "
+check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+
+# The bucket is a pure function of ts: refreshes from different zones agree.
+for z in UTC Asia/Kolkata; do
+	r="r_$(tr '/' '_' <<<"$z" | tr 'A-Z' 'a-z')"
+	q "SET TimeZone = '$z'; SELECT pgcolumnar.create_rollup('$r', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}',
+	   '{count(*), sum(v), min(v), max(v), avg(f)}'); SELECT pgcolumnar.refresh_rollup('$r');" >/dev/null
+done
+check "refreshes from sessions in UTC and Asia/Kolkata build the same rollup" \
+	"$(exact "SELECT * FROM r_utc")" "$(exact "SELECT * FROM r_asia_kolkata")"
+# Empty equals empty: in the first red run both were, and the arm above passed.
+check_num "premise: the zone rollups hold a row per key of the recompute" \
+	"$(q "SELECT count(*) FROM r_utc;")" "$(q "SELECT count(*) FROM ($RECOMPUTE) z;")"
+check_num "premise: and that is not zero" "$(at_least "$(q "SELECT count(*) FROM r_utc;")" 1)" "1"
+
+# Cost: after a small append to the whole table, a refresh reads the new groups.
+load 37301 38300 "2026-03-16 00:00:00+00"
+q "SELECT pg_stat_reset();" >/dev/null
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+	-c "SELECT pgcolumnar.refresh_rollup('r_hourly')" -c "SELECT pg_stat_force_next_flush()" >/dev/null 2>&1
+read_blocks="$(q "SELECT coalesce(heap_blks_read, 0) + coalesce(heap_blks_hit, 0) FROM pg_statio_user_tables WHERE relname = 'src';")"
+pages="$(q "SELECT pg_relation_size('src') / 8192;")"
+echo "-- refresh after a 1000-row append read $read_blocks of $pages blocks"
+check_num "premise: the refresh after a small append read the source at all" "$(at_least "$read_blocks" 1)" "1"
+# Reading nothing also reads under a fifth: the arm requires a read.
+check_num "a refresh after a small append reads under a fifth of the source" \
+	"$( [ -n "$read_blocks" ] && [ "$read_blocks" -ge 1 ] && at_least $((pages - 5 * read_blocks)) 1 || echo "read ${read_blocks:-nothing}")" "1"
+check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+
+# Phase 1 folds appends only; anything else is refused, and the rollup is untouched.
+before="$(exact "SELECT * FROM r_hourly")"
+check_num "premise: the rollup holds rows before the delete" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
+q "DELETE FROM src WHERE dev = 3 AND ts < '2026-03-01 06:00:00+00';" >/dev/null
+check "a refresh after a delete is refused until phase 2" \
+	"$(sqlstate "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "0A000"
+check "and the refused refresh changed nothing" "$(exact "SELECT * FROM r_hourly")" "$before"
+
+# Refused at creation.
+check "a width with months is refused" \
+	"$(sqlstate "SELECT pgcolumnar.create_rollup('r_m', 'src', 'ts', '1 month', '$ORIGIN', '{}', '{count(*)}');")" "22023"
+check "an aggregate that does not combine is refused" \
+	"$(sqlstate "SELECT pgcolumnar.create_rollup('r_p', 'src', 'ts', '1 hour', '$ORIGIN', '{}',
+	   '{percentile_cont(0.5) WITHIN GROUP (ORDER BY v)}');")" "0A000"
+
+pgc_summary
