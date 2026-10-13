@@ -610,4 +610,8 @@ guard_tests 419
 # cluster_tests 528 -> 529 for the #1330 review's NULL-group arm in
 # test_native_groupagg.py, one test, by collection on this branch rebased onto
 # 614eb02 (#1331).
-cluster_tests 529
+#
+# cluster_tests 529 -> 530 for #1337's test_temporal.py::test_for_portion_of, the
+# FOR PORTION OF arms moved into their own test, by collection on this branch
+# (main at a30faeb).
+cluster_tests 530

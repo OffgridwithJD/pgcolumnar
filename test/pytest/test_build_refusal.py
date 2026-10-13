@@ -672,12 +672,30 @@ def _fp_cli(tree, user="", env=None):
     could not be read. lib.sh's wrapper passes that through unchanged.
     """
     argv = [sys.executable, str(_FP_MODULE), "fingerprint", str(tree)]
+    scratch = None
     if user:
-        argv = ["runuser", "-u", user, "--"] + argv
+        # THE UNPRIVILEGED USER MUST REACH THE INTERPRETER AND THE MODULE, not only
+        # the tree. A checkout under a 0750 home, or a venv under a 0700 directory,
+        # left both unreachable: the read failed with EACCES before it began, the
+        # premise "the tree fingerprints at all" read empty, and the arm reported a
+        # product failure that was the box's permissions (#1337, measured as root on
+        # a 0750 $HOME). The module is stdlib-only, so a copy of it in a traversable
+        # directory and the base interpreter are the same entry point.
+        scratch = pathlib.Path(tempfile.mkdtemp(prefix="pgc-fpmod-"))
+        scratch.chmod(0o755)
+        mod = scratch / _FP_MODULE.name
+        shutil.copyfile(_FP_MODULE, mod)
+        mod.chmod(0o644)
+        base = getattr(sys, "_base_executable", None) or sys.executable
+        argv = ["runuser", "-u", user, "--", base, str(mod), "fingerprint", str(tree)]
     e = dict(os.environ)
     if env:
         e.update(env)
-    p = subprocess.run(argv, capture_output=True, text=True, env=e)
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, env=e)
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
     return p.stdout.strip(), p.returncode
 
 

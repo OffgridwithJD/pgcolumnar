@@ -126,13 +126,24 @@ pk_rows="$(q 'SELECT count(*) FROM rp_pk')"
 pk_hash="$(q "SELECT md5(string_agg(id::text||':'||v, ',' ORDER BY id)) FROM rp_pk")"
 
 # With the precondition met, heap succeeds. So the concurrent form IS reachable on
-# this build, and a columnar failure is ours rather than a missing primary key.
+# this build, and a columnar failure is not a missing primary key.
 check "control: with an identity index, REPACK (CONCURRENTLY) succeeds on heap" \
 	"$(psql_run 'REPACK (CONCURRENTLY) rp_pk_heap;' 2>&1 | grep -c 'ERROR' || true)" "0"
 
-c_pk="$(err_of 'REPACK (CONCURRENTLY) rp_pk;')"
-check "and on a columnar table it raises OUR error, so it is a columnar behaviour" \
-	"$(case "$c_pk" in *"not supported"*) echo yes ;; *) echo "no ($c_pk)" ;; esac)" "yes"
+# WHO REFUSES CHANGED IN POSTGRESQL 19beta4 (#1337). From 19beta4, core restricts
+# REPACK (CONCURRENTLY) to the heap access method (repack.c: "This operation is only
+# supported for the "heap" access method.", 0A000), before the access method is
+# consulted. Earlier 19 betas reach our refusal instead. Either is a refusal of the
+# concurrent form on a columnar table, for a stated reason; anything else -- a
+# success, or another error -- is not. The cause is read from the DETAIL, because
+# both of core's REPACK refusals share one ERROR line.
+c_pk="$(psql_run 'REPACK (CONCURRENTLY) rp_pk;' 2>&1 | grep -oE '(ERROR|DETAIL):.*' | tr '\n' ' ')"
+check "and on a columnar table it is refused: by core's heap-only check from 19beta4, else by ours" \
+	"$(case "$c_pk" in
+		*"not supported yet"*)                                   echo yes ;;
+		*'only supported for the "heap" access method'*)         echo yes ;;
+		*)                                                       echo "no (${c_pk:-succeeded})" ;;
+	esac)" "yes"
 
 # A half-finished concurrent rewrite would be the bad outcome. It does not happen.
 check "the columnar table is undamaged after the refused concurrent repack: rows" \

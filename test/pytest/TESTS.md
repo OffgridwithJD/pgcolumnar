@@ -5225,9 +5225,19 @@ its row in place, so the in-transaction arm cannot be satisfied by a delete that
 
 ## 66. test_temporal.py: a columnar table enforces temporal constraints like a heap
 
-Port of `temporal.sh` (#432). PostgreSQL 18 adds `WITHOUT OVERLAPS` primary keys, 19 adds
-`UPDATE ... FOR PORTION OF`, and both run through the index and constraint machinery
-pgColumnar integrates with. The suite builds a heap/columnar pair and asserts they agree.
+Port of `temporal.sh` (#432). PostgreSQL 18 adds `WITHOUT OVERLAPS` primary keys, 19beta2 had
+`UPDATE ... FOR PORTION OF` (19beta4 removed it, #1337), and both run through the index and
+constraint machinery pgColumnar integrates with. The suite builds a heap/columnar pair and
+asserts they agree.
+
+**FOR PORTION OF is gated on the grammar, not the major (#1337).** A version gate ran those
+arms on 19beta4, which cannot parse them, and failed both storage types alike. Worse,
+`for portion of result matches` passed there: it compared the two tables, and two updates
+that both failed leave them equal. Both twins now probe the grammar with an `EXPLAIN` that
+writes nothing. The result arm also requires the portion under its new key, so a failed
+update fails it. The shell suite records the three arms as SKIPs where the clause is
+absent. Here they are `test_for_portion_of`, unrunnable there and listed per major in
+`expected_unrunnable.txt`.
 
 **This is the first pair unblocked by #1131.** `temporal.sh` gates on `btree_gist` — a
 `WITHOUT OVERLAPS` key needs a GiST index over the scalar part — and records that refusal
@@ -5254,7 +5264,8 @@ table alone, and `overlapping insert rejected (columnar)` reddens with `got 'ok'
 
 | test | what it holds |
 | --- | --- |
-| `test_temporal` | every arm: heap and columnar agree on accepting non-overlapping rows and rejecting an overlapping one, the accepted rows are really there, the PK contents match, and on 19 the FOR PORTION OF update and its result set match |
+| `test_temporal` | heap and columnar agree on accepting non-overlapping rows and rejecting an overlapping one, the accepted rows are really there, and the PK contents match |
+| `test_for_portion_of` | where the grammar has `UPDATE ... FOR PORTION OF`: the update applies on both, the tables match, and the portion is in the columnar table under its new key. Its own fixture; unrunnable where the clause is absent (15 to 18, and 19 from beta4) |
 
 ## 67. test_native_parquet_dict_oob.py: a crafted dictionary index must not read out of bounds
 
