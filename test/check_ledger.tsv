@@ -915,12 +915,14 @@ harness_selftest	390-a-registered-suite-must-account	a declared suite that produ
 harness_selftest	390-a-registered-suite-must-account	a declared suite the driver never dispatched reconciles	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a file that does not exist is reported absent, not exempt	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a hash inside a word does not hide the call after it	15;16;17;18;19	never	-
+harness_selftest	390-a-registered-suite-must-account	a lib.sh accounting line is seen by the narrow reader	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	390-a-registered-suite-must-account	a log carrying lib.sh's accounting line is accounted	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a log carrying neither is not accounted	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	a log claiming PASSED without the accounting line shows none	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
+harness_selftest	390-a-registered-suite-must-account	a log claiming PASSED without the accounting line shows none	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
 harness_selftest	390-a-registered-suite-must-account	a long suite that calls pgc_summary still declares accounting	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a longer name containing pgc_summary is not a declaration	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	a passing log shows accounting	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	390-a-registered-suite-must-account	a passing log shows accounting	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	390-a-registered-suite-must-account	a private tally is NOT seen by the narrow reader	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
 harness_selftest	390-a-registered-suite-must-account	a registered suite that is accounted by nothing FAILS	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a suite recorded as known debt passes	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a suite recorded as never dispatched that DID account is caught	15;16;17;18;19	never	-
@@ -931,16 +933,17 @@ harness_selftest	390-a-registered-suite-must-account	a suite that now accounts b
 harness_selftest	390-a-registered-suite-must-account	a suite the driver never dispatched passes	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	a trailing comment after the call does not hide it	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	an absent log shows no accounting rather than erroring	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	an accounting line that does not start its line is refused	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
+harness_selftest	390-a-registered-suite-must-account	an accounting line that does not start its line is refused	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
 harness_selftest	390-a-registered-suite-must-account	an indented comment is still a comment	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	an undeclared suite that DID account is caught too	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and a failed population reconciliation fails the major	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and a failed reconciliation sets the per-major failure flag	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and a log carrying only its OWN checks-run line is accounted too	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	and a reworded producer line is refused, so the arm can fail	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
-harness_selftest	390-a-registered-suite-must-account	and a skip, which reached the summary and counted zero	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	390-a-registered-suite-must-account	and a log with neither is seen by neither	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
+harness_selftest	390-a-registered-suite-must-account	and a reworded producer line is refused, so the arm can fail	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
+harness_selftest	390-a-registered-suite-must-account	and a skip, which reached the summary and counted zero	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	390-a-registered-suite-must-account	and absent is distinguishable from a present file that does not declare	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	and an incomplete	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	390-a-registered-suite-must-account	and an incomplete	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	390-a-registered-suite-must-account	and debt naming a suite that is not registered is reported too	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and it agrees with the real reader on a SHORT file, which is why it survived review	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and it is NAMED, so the reader does not have to diff two lists	15;16;17;18;19	never	-
@@ -948,8 +951,8 @@ harness_selftest	390-a-registered-suite-must-account	and it is named as that fau
 harness_selftest	390-a-registered-suite-must-account	and it is named as the opposite fault, not the same one	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and it is named, which the symmetry check could never do	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and names nothing when the two readers agree	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	and prose containing the word does not count as the line	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
-harness_selftest	390-a-registered-suite-must-account	and so does a failing one, which is the point	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	390-a-registered-suite-must-account	and prose containing the word does not count as the line	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
+harness_selftest	390-a-registered-suite-must-account	and so does a failing one, which is the point	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	390-a-registered-suite-must-account	and sorts its inputs, because the runner appends them in SUITES order	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and the excused one is not named as a failure	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and the headline a reader sees is that number	15;16;17;18;19	never	-
@@ -998,7 +1001,7 @@ harness_selftest	390-a-registered-suite-must-account	the identity catches comm r
 harness_selftest	390-a-registered-suite-must-account	the own-mechanism difference names the suite the readers disagree about	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	the partition over the real suite list adds up	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	the population partitions, and prints inputs == sum(buckets)	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	the reader accepts the line the producer actually emits	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	390-a-registered-suite-must-account	the reader accepts the line the producer actually emits	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	390-a-registered-suite-must-account	the reader does not answer yes for every registered suite	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	the reconciliation prints inputs == sum(buckets)	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	the record cannot introduce a suite the source never declared	15;16;17;18;19	never	-
@@ -1591,11 +1594,11 @@ harness_selftest	580-a-hand-rebuild-must-record	the hand rebuild tool records wh
 harness_selftest	580-a-hand-rebuild-must-record	the recorder refuses when it is not told what was installed	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
 harness_selftest	580-a-hand-rebuild-must-record	the stack canary object is exempt, whatever the architecture calls it	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;the symbol exemption matches nothing, so every toolchain name rebuild.sh has always ignored is reported as an unresolved symbol
 harness_selftest	580-a-hand-rebuild-must-record	without the exemption it refuses EARLIER, naming the missing function	15;16;17;18;19	2026-09-25	rebuild.sh's fail-closed assertion is removed, so a missing exemption function leaves the undefined list empty and the check reports success
-harness_selftest	590-a-declared-suite-must-account	a completed suite still reads as having reached its summary	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
+harness_selftest	590-a-declared-suite-must-account	a completed suite still reads as having reached its summary	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	590-a-declared-suite-must-account	a suite that DID reach its summary is not given a second one	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	a suite that never reached its summary is given the accounting it owes	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	a terminated suite reads as terminated, not as a completed one	15;16;17;18;19	2026-09-23	pgc_log_shows_accounting folded back to two values, so a terminated log reads as a completed one
-harness_selftest	590-a-declared-suite-must-account	and a log with no accounting still reads as none	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
+harness_selftest	590-a-declared-suite-must-account	and a log with no accounting still reads as none	15;16;17;18;19	2026-10-13	part 590's narrow reader answers yes where it found no accounting line
 harness_selftest	590-a-declared-suite-must-account	and it is marked TERMINATED, so a reader can tell it from a full run	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	and nothing still arms the bare teardown	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	and pgc_setup still calls pgc_summary on none of them	15;16;17;18;19	2026-10-12	lib.sh's pgc_setup calls pgc_summary before one of its exit 1 paths

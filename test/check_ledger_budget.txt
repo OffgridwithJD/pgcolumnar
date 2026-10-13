@@ -1363,4 +1363,11 @@ suites_not_covered 247
 #     never         1705 - 21 = 1684
 #     dated          279 + 21 =  300
 #     1684 + 300 == 1984
+#
+# Of the 21, three were 'premise:' checks in part 390 that a 590 mutation
+# reddened; by #1236 they are arms, so the prefix was dropped (OffgridwithJD's
+# review of #1313). The old-name rows were removed and the new names dated from
+# fresh runs on this tree: a clean run (1223/1223) and both 590 mutations, on
+# each of 15-19, merged with --mutation and --target. Those runs also re-observe
+# 20 of the other dated rows, whose last-observed-red date moves to 2026-10-13.
 checks_never_observed_red 1684
