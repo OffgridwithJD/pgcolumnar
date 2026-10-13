@@ -319,6 +319,62 @@ check "a retry over the failed attempt's file moves the partition, exactly once"
 	"$(q "SELECT pgcolumnar.tier_partition('o_jan', 'tier_pq', '$W/o.parquet');")|$(digest o)|$(q "SELECT relkind FROM pg_class WHERE oid = 'o_jan'::regclass;")" \
 	"8928|$ob|f"
 
+# ---- names and columns the foreign table must reproduce (#1317 review) ---------
+# Each failed after the export in the first version: a quoted schema, owner or
+# grantee was quoted twice (%I over a reg* cast that quotes itself), and ATTACH
+# refused a column whose collation or generation the foreign table lacked.
+# Each moves a small partition, which must then read back as before.
+mini() {	# mini SCHEMA.TABLE [COLUMNS]: a 100-row parent with one January partition
+	psql_run "CREATE TABLE $1 (ts timestamptz NOT NULL, v int${2:-}) PARTITION BY RANGE (ts);"
+	psql_run "CREATE TABLE ${1}_jan PARTITION OF $1 FOR VALUES FROM ('2026-01-01') TO ('2026-02-01') USING pgcolumnar;"
+	psql_run "INSERT INTO $1 (ts, v) SELECT '2026-01-01'::timestamptz + g * interval '7 h', g FROM generate_series(0, 99) g;"
+}
+moved_reads() {	# moved_reads SCHEMA.TABLE PATH COLUMNS-TO-READ -> rows moved|relkind|digest-equal
+	local before after
+	before="$(q "SELECT md5(string_agg($3, ',' ORDER BY ts)) FROM $1;")"
+	out="$(sqlstate_or "SELECT pgcolumnar.tier_partition('${1}_jan', 'tier_pq', '$2');")"
+	after="$(q "SELECT md5(string_agg($3, ',' ORDER BY ts)) FROM $1;")"
+	echo "$out|$(q "SELECT relkind FROM pg_class WHERE oid = '${1}_jan'::regclass;")|$([ -n "$before" ] && [ "$before" = "$after" ] && echo same || echo "differs")"
+}
+sqlstate_or() {
+	local o
+	o=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "$1" 2>&1)
+	case "$o" in ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$o" | head -1;; *) echo "$o";; esac
+}
+psql_run 'CREATE SCHEMA "Tier Q";'
+mini '"Tier Q".qs'
+check "a partition in a schema whose name needs quoting moves and reads back the same" \
+	"$(moved_reads '"Tier Q".qs' "$W/qs.parquet" "ts::text || v")" "100|f|same"
+psql_run 'CREATE ROLE "Owner X";'
+mini qo
+psql_run 'ALTER TABLE qo_jan OWNER TO "Owner X";'
+check "a partition owned by a role whose name needs quoting moves, and keeps that owner" \
+	"$(moved_reads qo "$W/qo.parquet" "ts::text || v")|$(q "SELECT relowner::regrole FROM pg_class WHERE oid = 'qo_jan'::regclass;")" \
+	'100|f|same|"Owner X"'
+psql_run 'CREATE ROLE "Reader Y";'
+mini qg
+psql_run 'GRANT SELECT ON qg_jan TO "Reader Y";'
+check "a grant to a role whose name needs quoting is carried to the foreign partition" \
+	"$(moved_reads qg "$W/qg.parquet" "ts::text || v")|$(q "SELECT has_table_privilege('Reader Y', 'qg_jan', 'SELECT');")" \
+	"100|f|same|t"
+mini qc ', t text COLLATE "C"'
+psql_run "UPDATE qc SET t = 'r' || v;"
+check "a column with its own collation moves and reads back the same" \
+	"$(moved_reads qc "$W/qc.parquet" "ts::text || v || t")" "100|f|same"
+mini qgs ', w int GENERATED ALWAYS AS (v * 3) STORED'
+check "a stored generated column moves and reads back the same" \
+	"$(moved_reads qgs "$W/qgs.parquet" "ts::text || v || w")" "100|f|same"
+if [ "$PGC_MAJOR" -ge 18 ]; then
+	mini qgv ', w int GENERATED ALWAYS AS (v * 5) VIRTUAL'
+	check "a virtual generated column moves and reads back the same" \
+		"$(moved_reads qgv "$W/qgv.parquet" "ts::text || v || w")" "100|f|same"
+else
+	check_skip "a virtual generated column moves and reads back the same" \
+		"SKIP  a virtual generated column moves and reads back the same (PostgreSQL $PGC_MAJOR has none; 18 added them)" \
+		"PostgreSQL $PGC_MAJOR has no virtual generated columns"
+fi
+
 # ---- a failure after each step ----------------------------------------------
 for step in export detach drop create attach; do
 	build f

@@ -627,7 +627,8 @@ source, when the rollup was current before the rewrite.
 Moves the columnar partition `partition` to a Parquet file at `path`. Then
 attaches the file as a foreign table of `server`, which must use the
 `pgcolumnar_parquet` wrapper. The foreign table takes the partition's name,
-columns, owner, bounds, grants and comment. Returns the number of rows moved.
+columns (with their collations and generated expressions), owner, bounds,
+grants and comment. Returns the number of rows moved.
 
 The function runs as one transaction, at READ COMMITTED only (`25000`
 otherwise). It holds `ACCESS EXCLUSIVE` on the parent from the detach until

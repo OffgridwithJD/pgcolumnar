@@ -55,3 +55,8 @@
 # hll 2.19 does not build against PostgreSQL 19 (FuncnameGetCandidates gained an
 # argument), so the hll half of #1296's compatibility test is UNSUPPORTED_MAJOR there.
 19 test_approx_aggregates.py::test_hll_over_columnar
+
+# PostgreSQL 15 to 17: virtual generated columns arrived in PostgreSQL 18.
+15 test_tier_partition.py::test_tier_partition_moves_a_virtual_generated_column
+16 test_tier_partition.py::test_tier_partition_moves_a_virtual_generated_column
+17 test_tier_partition.py::test_tier_partition_moves_a_virtual_generated_column
