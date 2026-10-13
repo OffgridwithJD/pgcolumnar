@@ -388,6 +388,27 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(f"{_refresh(conn, 'relayered_hourly')}|{_one(conn, rq)}", f"0A000|{before_re}",
                 "a delete in a bucket whose history the same refresh retires is refused, and the rollup is unchanged")
 
+    # Rows deleted from a group expire then retires (found on #1328): they cannot
+    # be recomputed, and history would keep counting them, so the refresh refuses.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE thinned (at timestamptz, reading int) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('thinned', stripe_row_limit => 2000)")
+        cur.execute("INSERT INTO thinned SELECT now() - interval '45 days' + g * interval '2 s', g"
+                    " FROM generate_series(1, 1500) g")
+        cur.execute("INSERT INTO thinned SELECT now() - interval '2 days' + g * interval '2 s', g"
+                    " FROM generate_series(1, 1500) g")
+        cur.execute(f"SELECT pgcolumnar.create_rollup('thinned_hourly', 'thinned', 'at', '1 hour', '{ORIGIN}',"
+                    " '{}', '{count,max}', '{*,reading}')")
+        cur.execute("SELECT pgcolumnar.refresh_rollup('thinned_hourly')")
+        cur.execute("DELETE FROM thinned WHERE at < now() - interval '14 days' AND reading % 5 = 0")
+        cur.execute("SELECT pgcolumnar.set_options('thinned', ttl_column => 'at', ttl_interval => '14 days')")
+    expect.num(_one(conn, "SELECT pgcolumnar.expire('thinned')"), 1,
+               "premise: expire retired the group the delete thinned")
+    tq = "SELECT string_agg(bucket || ':' || count || ':' || max_reading, ',' ORDER BY bucket) FROM thinned_hourly"
+    before_thin = _one(conn, tq)
+    expect.text(f"{_refresh(conn, 'thinned_hourly')}|{_one(conn, tq)}", f"0A000|{before_thin}",
+                "a delete in a group that expire then retires is refused, and the rollup is unchanged")
+
     # A day is 24 hours to date_bin in every zone. Europe/Berlin moves its clocks
     # at 01:00 UTC on 2026-03-29, inside the bucket [03-28 06:00, 03-29 06:00) UTC
     # (ORIGIN is at 06:00), so that bucket is 23 hours long in Berlin. It must be

@@ -331,6 +331,24 @@ check "a delete in a bucket whose history the same refresh retires is refused, a
 	"$(sqlstate "SELECT pgcolumnar.refresh_rollup('r_hd2');")|$(q "SELECT md5(string_agg(bucket || ':' || count || ':' || sum_v, ',' ORDER BY bucket)) FROM r_hd2;")" \
 	"0A000|$hd2_before"
 
+# Rows deleted from a group that expire then retires, before the next refresh: the
+# rows are gone, so their buckets cannot be recomputed, and folding the group's
+# range into history would keep counting them. Found by @OffgridwithJD on #1328
+# (1000 counted where the source had 600). The refresh is refused instead.
+q "CREATE TABLE dx (ts timestamptz, v int) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('dx', stripe_row_limit => 1000);
+   INSERT INTO dx SELECT now() - interval '60 days' + g * interval '1 s', g FROM generate_series(1, 1000) g;
+   INSERT INTO dx SELECT now() - interval '1 day' + g * interval '1 s', g FROM generate_series(1, 1000) g;
+   SELECT pgcolumnar.create_rollup('r_dx', 'dx', 'ts', '1 day', '$ORIGIN', '{}', '{count}', '{*}');
+   SELECT pgcolumnar.refresh_rollup('r_dx');
+   DELETE FROM dx WHERE ts < now() - interval '30 days' AND v <= 400;
+   SELECT pgcolumnar.set_options('dx', ttl_column => 'ts', ttl_interval => '30 days');" >/dev/null
+check_num "premise: expire retired the group the delete thinned" "$(q "SELECT pgcolumnar.expire('dx');")" "1"
+dx_before="$(q "SELECT string_agg(bucket || ':' || count, ',' ORDER BY bucket) FROM r_dx;")"
+check "a delete in a group that expire then retires is refused, and the rollup is unchanged" \
+	"$(sqlstate "SELECT pgcolumnar.refresh_rollup('r_dx');")|$(q "SELECT string_agg(bucket || ':' || count, ',' ORDER BY bucket) FROM r_dx;")" \
+	"0A000|$dx_before"
+
 # A day bucket is 24 hours (date_bin's day), whatever the session's zone. In
 # America/New_York, 2026-03-08 is 23 hours long, and the dirty bucket of that UTC
 # day must still be recomputed up to its end: rows run to 23:30 UTC.
