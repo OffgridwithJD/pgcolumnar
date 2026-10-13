@@ -295,7 +295,7 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
     expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.storage WHERE storage_id = ANY (%s)" % (
                    "ARRAY[" + ",".join(str(s) for s in sids) + "]::bigint[]")), 0,
                "and the dropped partitions' pgcolumnar storage rows are gone")
-    expect.num(len(plan("xl", "2019-03-28 12:00+00")), 0, "a second plan for the same cutoff is empty")
+    expect.num(len(plan("xl", "2019-03-28 12:00+00")), 0, "premise: a second plan for the same cutoff is empty")
 
     # A timestamp key: the cutoff is the session's wall-clock time. 06:00 in Tokyo is
     # 21:00 the previous day in UTC, so a UTC reading would retire nothing at the

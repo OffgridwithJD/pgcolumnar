@@ -235,7 +235,7 @@ check "and every row the remaining partitions held is still there" \
 	   WHERE '2020-01-01 00:00+00'::timestamptz + g * interval '1 hour' >= '2020-03-01 00:00+00';")"
 check "and the dropped partitions' pgcolumnar storage rows are gone" \
 	"$(q "SELECT count(*) FROM pgcolumnar.storage WHERE storage_id IN (${sids:-0});")" "0"
-check "a second plan for the same cutoff is empty" \
+check "premise: a second plan for the same cutoff is empty" \
 	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-15 00:00+00');")" "0"
 
 # A timestamp (no zone) key: the cutoff is read in the session's zone, as the key's
