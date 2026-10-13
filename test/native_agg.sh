@@ -150,9 +150,13 @@ check "empty min NULL"  "$(q 'SELECT min(label) IS NULL FROM e;')"       "t"
 # querying session, against a control that must decode the same column.
 psql_run "CREATE TABLE tz (dev int, ts timestamptz) USING pgcolumnar;"
 psql_run "SELECT pgcolumnar.set_options('tz', stripe_row_limit => 1000);"
-psql_run "INSERT INTO tz SELECT g % 50, '2026-03-01'::timestamptz + ((g::bigint * 7919) % 400000) * interval '1 min'
-          FROM generate_series(1, 400000) g;"
-psql_run "CREATE TABLE tzh AS SELECT * FROM tz;"
+# THE HEAP IS WRITTEN FROM THE GENERATOR, NOT COPIED (#1339): a CTAS from tz put a
+# write path's consistent error on both sides of every parity arm.
+_tzgen="SELECT g % 50, '2026-03-01'::timestamptz + ((g::bigint * 7919) % 400000) * interval '1 min'
+          FROM generate_series(1, 400000) g"
+psql_run "INSERT INTO tz $_tzgen;"
+psql_run "CREATE TABLE tzh (dev int, ts timestamptz) USING heap;"
+psql_run "INSERT INTO tzh $_tzgen;"
 # THE ROW COUNT FIRST. The first draft computed g * 7919 in int, which overflows
 # past g = 271,000; the INSERT failed, psql_run reported nothing, and every arm
 # below measured an empty table -- the decode "control" read 3 blocks.
