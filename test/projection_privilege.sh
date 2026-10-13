@@ -163,6 +163,16 @@ check "the no-EXECUTE role never reaches the body, so the grant is what stopped 
 check "while the EXECUTE role reaches the projection lookup on the same call" \
 	"$(state_as t_prjexec "SELECT count(*) FROM pgcolumnar.read_projection('prjopen','no_such_proj');")" \
 	"42704"
+# THE SAME QUESTION OF reconstruct_via_projection (#1339). It has its own REVOKE and
+# its own copy of the C check, and only read_projection was ever asked: with its
+# REVOKE deleted, t_prjnone reached the C body, got 42501 from it, and every arm
+# here stayed green.
+check "reconstruct: the no-EXECUTE role never reaches the body, so the grant is what stopped it" \
+	"$(state_as t_prjnone "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('prjopen','no_such_proj');")" \
+	"42501"
+check "reconstruct: the EXECUTE role reaches the projection lookup on the same call" \
+	"$(state_as t_prjexec "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('prjopen','no_such_proj');")" \
+	"42704"
 
 # ---- layer two: the C check, reached only because EXECUTE was granted --------
 #
@@ -196,6 +206,9 @@ check "and THAT refusal is the C check, which raises 42501 from aclcheck_error" 
 # than the lookup being unreachable.
 check "the base ACL is checked before the projection name is looked up" \
 	"$(state_as t_prjexec "SELECT count(*) FROM pgcolumnar.read_projection('secret','no_such_proj');")" \
+	"42501"
+check "reconstruct: the base ACL is checked before the projection name is looked up" \
+	"$(state_as t_prjexec "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('secret','no_such_proj');")" \
 	"42501"
 
 # ---- the bar is SELECT, not ownership ---------------------------------------
@@ -248,6 +261,9 @@ check "and the refusal says the feature is not supported, not that a privilege i
 # SELECT, and 0A000. So 42501 here is the ordering, not RLS being switched off.
 check "a caller with no SELECT is told a privilege is missing, not that RLS is in force" \
 	"$(state_as t_prjexec "SELECT count(*) FROM pgcolumnar.read_projection('secret','p1');")" \
+	"42501"
+check "reconstruct: a caller with no SELECT is told a privilege is missing, not that RLS is in force" \
+	"$(state_as t_prjexec "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('secret','p1');")" \
 	"42501"
 
 pgc_summary
