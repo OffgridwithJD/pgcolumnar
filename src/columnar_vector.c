@@ -2079,6 +2079,28 @@ pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsv
 	snap = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 
 	/*
+	 * THE EXTENT FIRST (#1304 option 5): one index lookup, constant in the table,
+	 * when a complete extent is visible. A timestamp is byval, so the bound
+	 * outlives the relation. Otherwise the zone maps below, which are correct and
+	 * cost a scan of every group's.
+	 */
+	{
+		Datum		emin,
+					emax;
+		bool		hasValues;
+
+		if (PgColumnarExtentBound(r, col, snap, &emin, &emax, &hasValues))
+		{
+			table_close(r, AccessShareLock);
+			if (!hasValues)
+				return false;	/* no value at all: nothing to bound */
+			*lo = (double) DatumGetTimestamp(emin);
+			*hi = (double) DatumGetTimestamp(emax);
+			return true;
+		}
+	}
+
+	/*
 	 * TWO CATALOG SCANS, NOT ONE PER GROUP (#1304 review): the group list, for the
 	 * count, and every group's zone map for this column. A group with no zone-map
 	 * row for the column is missing from the second list, and a range that leaves

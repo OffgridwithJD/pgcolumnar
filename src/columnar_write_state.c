@@ -3246,6 +3246,22 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	}
 	PG_END_TRY();
 
+	/*
+	 * The column extent (#1304 option 5) folds this group's whole-chunk zone
+	 * maps; the transaction writes its row at pre-commit. The base table only:
+	 * a projection's writer has its own tuple descriptor, and nothing reads a
+	 * projection's extent.
+	 */
+	if (writeState->tupdescIsRel)
+		foreach(lc, zoneRows)
+		{
+			NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
+
+			if (z->vectorIndex == -1)
+				PgColumnarExtentNote(writeState->relid, writeState->storageId,
+									 z->columnIndex, z);
+		}
+
 	table_close(rel, RowExclusiveLock);
 
 	MemoryContextSwitchTo(oldContext);

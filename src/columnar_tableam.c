@@ -2663,11 +2663,26 @@ pgcolumnar_xact_callback(XactEvent event, void *arg)
 {
 	switch (event)
 	{
+		case XACT_EVENT_PRE_PREPARE:
+			/*
+			 * #1304 option 5: a prepared transaction's extent rows are written
+			 * here, where catalog writes are still allowed, so its groups are
+			 * flushed here first. The PREPARE arm below then finds nothing.
+			 */
+			PgColumnarFlushAllPendingWrites();
+			PgColumnarFlushAllDeleteVectors();
+			PgColumnarExtentPreCommit();
+			break;
 		case XACT_EVENT_PRE_COMMIT:
 		case XACT_EVENT_PARALLEL_PRE_COMMIT:
 		case XACT_EVENT_PREPARE:
 			PgColumnarFlushAllPendingWrites();
 			PgColumnarFlushAllDeleteVectors();
+			/* after the flush, which is what gives the extent its last groups */
+			if (event == XACT_EVENT_PRE_COMMIT)
+				PgColumnarExtentPreCommit();
+			else
+				PgColumnarExtentAtXactEnd();
 
 			/*
 			 * PREPARE frees TopTransactionContext and never reaches the
@@ -2700,6 +2715,7 @@ pgcolumnar_xact_callback(XactEvent event, void *arg)
 			PgColumnarDiscardAllPendingWrites();
 			PgColumnarDiscardAllDeleteVectors();
 			PgColumnarDiscardFetchCache();
+			PgColumnarExtentAtXactEnd();
 			/*
 			 * Descriptors only: the memo contexts are TopTransactionContext
 			 * children, still live at callback time but taken by the

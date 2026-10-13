@@ -25,6 +25,7 @@
 
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+export PGC_EXTRA_CONF='max_prepared_transactions=2'
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
@@ -128,6 +129,27 @@ contains() {	# contains TABLE COLUMN TYPE -> yes when the extent contains the da
 	   FROM pgcolumnar.column_extent('$1', '$2') e;"
 }
 check "a savepoint rolled back after flushing may widen the extent, never narrow it" "$(contains cw ts timestamptz)" "yes"
+
+# A prepared transaction writes its extent row before PREPARE, where a catalog write
+# is still allowed; its groups commit with COMMIT PREPARED and must be inside it.
+# Its own table: cw's extent is already wider than its data, by the savepoint above.
+q "CREATE TABLE tp (ts timestamptz, v int) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('tp', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
+   INSERT INTO tp SELECT '2026-06-01'::timestamptz + g * interval '1 s', g FROM generate_series(1, 2000) g;" >/dev/null
+q "BEGIN; INSERT INTO tp SELECT '2040-01-01'::timestamptz + g * interval '1 s', g FROM generate_series(1, 3000) g;
+   PREPARE TRANSACTION 'ce_2pc';" >/dev/null
+q "COMMIT PREPARED 'ce_2pc';" >/dev/null
+check "a prepared transaction's groups are inside the extent after COMMIT PREPARED" "$(ext tp ts)" "$(truth tp ts)"
+
+# A table created and written inside a savepoint that rolls back leaves no extent
+# row behind: its storage never existed for anyone, and an orphan row would be kept
+# by nothing.
+q "BEGIN; SAVEPOINT s; CREATE TABLE gone (ts timestamptz) USING pgcolumnar;
+   INSERT INTO gone SELECT now() FROM generate_series(1, 2000);
+   ROLLBACK TO s; COMMIT;" >/dev/null
+check "a table created in a rolled-back savepoint leaves no extent rows" \
+	"$(q "SELECT count(*) FROM pgcolumnar.column_extent e
+	      WHERE NOT EXISTS (SELECT 1 FROM pgcolumnar.storage s WHERE s.storage_id = e.storage_id);")" "0"
 
 # ---- a shrink is recomputed, never guessed (jdatcmd, #1304) ---------------------
 #

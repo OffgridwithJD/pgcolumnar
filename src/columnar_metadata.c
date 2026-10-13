@@ -140,6 +140,14 @@
 #define Anum_free_space_freed_xid 4
 #define Natts_free_space 4
 
+/* attribute numbers for pgcolumnar.column_extent (#1304 option 5) */
+#define Anum_column_extent_storage_id 1
+#define Anum_column_extent_column_index 2
+#define Anum_column_extent_complete 3
+#define Anum_column_extent_minimum 4
+#define Anum_column_extent_maximum 5
+#define Natts_column_extent 5
+
 /* attribute numbers for pgcolumnar.retired_group (#1294) */
 #define Anum_retired_group_storage_id 1
 #define Anum_retired_group_group_number 2
@@ -1043,6 +1051,14 @@ PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 	 * that arm is this reset's removal proof.
 	 */
 	PgColumnarGroupMemoReset(true);
+
+	/*
+	 * A group leaving the storage may take the column's minimum or maximum with
+	 * it, so its extent is recomputed before this transaction commits (#1304
+	 * option 5): a shrink is recomputed, never guessed. Every path that retires a
+	 * group comes through here.
+	 */
+	PgColumnarExtentMarkRecompute(storageId);
 
 	if (haveRange && byteLength > 0)
 		record_free_space(storageId, fileOffset, byteLength);
@@ -2004,6 +2020,13 @@ PgColumnarDeleteMetadata(uint64 storageId)
 	delete_rows_by_storage_id("bloom", Anum_bloom_storage_id, storageId);
 	delete_rows_by_storage_id("free_space", Anum_free_space_storage_id, storageId);
 	delete_rows_by_storage_id("retired_group", Anum_retired_group_storage_id, storageId);
+	/*
+	 * #1304 option 5. Present only once the extension's SQL is at 1.0-alpha5; a
+	 * library ahead of its SQL must still be able to drop and truncate.
+	 */
+	if (PgColumnarExtentCatalogPresent())
+		delete_rows_by_storage_id("column_extent", Anum_column_extent_storage_id, storageId);
+	PgColumnarExtentForget(storageId);
 	delete_rows_by_storage_id("row_group", Anum_row_group_storage_id, storageId);
 	delete_rows_by_storage_id("storage", Anum_native_storage_storage_id, storageId);
 
@@ -4625,4 +4648,151 @@ PgColumnarDeleteProjectionRow(uint64 storageId, int projectionId)
 
 	table_close(rel, RowExclusiveLock);
 	CommandCounterIncrement();
+}
+
+/* -------------------------------------------------------------------------
+ * pgcolumnar.column_extent (#1304 option 5)
+ *
+ * Rows are only inserted and deleted, never updated in place: each committing
+ * writer inserts its own row, and a recompute replaces the rows it folded with
+ * one complete row. So two backends never touch the same tuple.
+ * ------------------------------------------------------------------------- */
+
+bool
+PgColumnarExtentCatalogPresent(void)
+{
+	return OidIsValid(get_relname_relid("column_extent", pgcolumnar_schema_oid()));
+}
+
+static bytea *
+extent_bytea(const char *bytes, int len)
+{
+	bytea	   *b = (bytea *) palloc(VARHDRSZ + len);
+
+	SET_VARSIZE(b, VARHDRSZ + len);
+	if (len > 0)
+		memcpy(VARDATA(b), bytes, len);
+	return b;
+}
+
+void
+PgColumnarInsertExtentRow(uint64 storageId, int columnIndex, bool complete,
+						  const char *minimum, int minimumLen,
+						  const char *maximum, int maximumLen)
+{
+	Relation	rel = open_columnar_table("column_extent", RowExclusiveLock);
+	Datum		values[Natts_column_extent];
+	bool		nulls[Natts_column_extent] = {false};
+	HeapTuple	tuple;
+
+	values[Anum_column_extent_storage_id - 1] = Int64GetDatum((int64) storageId);
+	values[Anum_column_extent_column_index - 1] = Int16GetDatum((int16) columnIndex);
+	values[Anum_column_extent_complete - 1] = BoolGetDatum(complete);
+	if (minimum == NULL)
+	{
+		/* a column with no values yet: no bound, and nothing for a fold to take */
+		nulls[Anum_column_extent_minimum - 1] = true;
+		nulls[Anum_column_extent_maximum - 1] = true;
+	}
+	else
+	{
+		values[Anum_column_extent_minimum - 1] = PointerGetDatum(extent_bytea(minimum, minimumLen));
+		values[Anum_column_extent_maximum - 1] = PointerGetDatum(extent_bytea(maximum, maximumLen));
+	}
+	tuple = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+	CatalogTupleInsert(rel, tuple);
+	heap_freetuple(tuple);
+	table_close(rel, RowExclusiveLock);
+}
+
+/*
+ * The extent rows of one column visible to the snapshot, as NativeExtentRow *.
+ * A NULL snapshot is the catalog snapshot.
+ */
+List *
+PgColumnarReadExtentRows(uint64 storageId, int columnIndex, Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("column_extent", AccessShareLock);
+	TupleDesc	td = RelationGetDescr(rel);
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	Oid			idx;
+	List	   *rows = NIL;
+
+	ScanKeyInit(&key[0], Anum_column_extent_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	ScanKeyInit(&key[1], Anum_column_extent_column_index, BTEqualStrategyNumber,
+				F_INT2EQ, Int16GetDatum((int16) columnIndex));
+	idx = pgcolumnar_scan_index_oid(rel, "column_extent_pkey");
+	scan = systable_beginscan(rel, idx, OidIsValid(idx), snapshot, 2, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		NativeExtentRow *r = (NativeExtentRow *) palloc0(sizeof(NativeExtentRow));
+		bool		isnull;
+		Datum		d;
+
+		r->tid = tuple->t_self;
+		r->complete = DatumGetBool(heap_getattr(tuple, Anum_column_extent_complete, td, &isnull));
+		d = heap_getattr(tuple, Anum_column_extent_minimum, td, &isnull);
+		if (!isnull)
+		{
+			bytea	   *mn = DatumGetByteaPCopy(d);
+			bytea	   *mx = DatumGetByteaPCopy(heap_getattr(tuple, Anum_column_extent_maximum, td, &isnull));
+
+			r->hasValues = true;
+			r->minimum = VARDATA(mn);
+			r->minimumLen = VARSIZE(mn) - VARHDRSZ;
+			r->maximum = VARDATA(mx);
+			r->maximumLen = VARSIZE(mx) - VARHDRSZ;
+		}
+		rows = lappend(rows, r);
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return rows;
+}
+
+void
+PgColumnarDeleteExtentRow(ItemPointer tid)
+{
+	Relation	rel = open_columnar_table("column_extent", RowExclusiveLock);
+
+	CatalogTupleDelete(rel, tid);
+	table_close(rel, RowExclusiveLock);
+}
+
+/*
+ * The relation a storage id belongs to, from pgcolumnar.storage, or InvalidOid.
+ * A projection's storage names its base relation too; callers that need the
+ * base storage compare PgColumnarStorageId of the opened relation. Pass a
+ * snapshot taken after the caller's own writes: the catalog snapshot can
+ * predate a storage row this transaction inserted.
+ */
+Oid
+PgColumnarStorageRelationOid(uint64 storageId, Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("storage", AccessShareLock);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	Oid			idx;
+	Oid			relid = InvalidOid;
+
+	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	idx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
+	scan = systable_beginscan(rel, idx, OidIsValid(idx), snapshot, 1, key);
+	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_native_storage_relation_oid,
+									 RelationGetDescr(rel), &isnull);
+
+		if (!isnull)
+			relid = DatumGetObjectId(d);
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return relid;
 }
