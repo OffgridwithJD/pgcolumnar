@@ -140,6 +140,12 @@
 #define Anum_free_space_freed_xid 4
 #define Natts_free_space 4
 
+/* attribute numbers for pgcolumnar.retired_group (#1294) */
+#define Anum_retired_group_storage_id 1
+#define Anum_retired_group_group_number 2
+#define Anum_retired_group_retired_at 3
+#define Natts_retired_group 3
+
 /* attribute numbers for columnar.delete_vector (spec 7.5) */
 #define Anum_delete_vector_storage_id 1
 #define Anum_delete_vector_group_number 2
@@ -963,6 +969,33 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 	 */
 	if (pgcolumnar_reclaim_coalesce)
 		CommandCounterIncrement();
+	table_close(rel, RowExclusiveLock);
+}
+
+/*
+ * PgColumnarRecordRetention
+ *		Record that pgcolumnar.expire retired a row group for retention (#1294).
+ *		An incremental rollup that keeps history must not recompute a bucket whose
+ *		raw rows retention dropped, and this row is how its refresh tells such a
+ *		group from one a delete or a rewrite removed. Called only by expire, in its
+ *		transaction, so a rolled-back expire leaves no record.
+ */
+void
+PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber)
+{
+	Relation	rel = open_columnar_table("retired_group", RowExclusiveLock);
+	Datum		values[Natts_retired_group];
+	bool		nulls[Natts_retired_group];
+	HeapTuple	tuple;
+
+	memset(nulls, false, sizeof(nulls));
+	values[Anum_retired_group_storage_id - 1] = Int64GetDatum((int64) storageId);
+	values[Anum_retired_group_group_number - 1] = Int64GetDatum((int64) groupNumber);
+	values[Anum_retired_group_retired_at - 1] = TimestampTzGetDatum(GetCurrentTransactionStartTimestamp());
+
+	tuple = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+	CatalogTupleInsert(rel, tuple);
+	heap_freetuple(tuple);
 	table_close(rel, RowExclusiveLock);
 }
 
@@ -1942,10 +1975,10 @@ delete_rows_by_storage_id(const char *tableName, AttrNumber storageAttno,
 	 * attnum both arrive as parameters, so the issue's stated method -- trace
 	 * the handle to its own open_columnar_table -- cannot classify this scan,
 	 * and it was left out of the population. Its call sites resolve it:
-	 * delete_vector, column_chunk, zone_map, bloom, free_space, row_group and
-	 * storage, every one keyed on storage_id and every one with a primary key
-	 * whose first column is storage_id. Each catalog's index follows the
-	 * <name>_pkey convention, checked for all seven.
+	 * delete_vector, column_chunk, zone_map, bloom, free_space, row_group,
+	 * storage and retired_group (#1294), every one keyed on storage_id and every
+	 * one with a primary key whose first column is storage_id. Each catalog's
+	 * index follows the <name>_pkey convention, checked for all eight.
 	 *
 	 * Size-aware like every other converted site: below the threshold this
 	 * resolves to InvalidOid and the scan stays sequential, which is what
@@ -1970,6 +2003,7 @@ PgColumnarDeleteMetadata(uint64 storageId)
 	delete_rows_by_storage_id("zone_map", Anum_zone_map_storage_id, storageId);
 	delete_rows_by_storage_id("bloom", Anum_bloom_storage_id, storageId);
 	delete_rows_by_storage_id("free_space", Anum_free_space_storage_id, storageId);
+	delete_rows_by_storage_id("retired_group", Anum_retired_group_storage_id, storageId);
 	delete_rows_by_storage_id("row_group", Anum_row_group_storage_id, storageId);
 	delete_rows_by_storage_id("storage", Anum_native_storage_storage_id, storageId);
 

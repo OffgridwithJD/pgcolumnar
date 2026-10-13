@@ -2594,6 +2594,7 @@ pgcolumnar_expire(PG_FUNCTION_ARGS)
 		{
 			PgColumnarVMClearForRowRange(rel, rg->firstRowNumber, rg->rowCount);
 			PgColumnarRetireGroup(storageId, rg->groupNumber);
+			PgColumnarRecordRetention(storageId, rg->groupNumber);
 			retired++;
 		}
 	}
