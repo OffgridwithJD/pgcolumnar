@@ -78,8 +78,9 @@ stronger codec writes less.
   data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
   aggregate over the scan instead. `GROUP BY` is vectorized too, by default. The
   scan groups and aggregates in one pass over the reader. The planner takes this
-  path when it estimates at most a tenth of `pgcolumnar.groupagg_max_groups`
-  groups. It takes
+  path only when the groups cannot exceed `pgcolumnar.groupagg_max_groups`. The
+  table's row count bounds them, and so do the time buckets for a `date_bin` or
+  `date_trunc` key. It takes
   plain columns and `date_bin` or `date_trunc` keys, and `count`, `sum`, `avg`,
   `min` and `max`. Set `pgcolumnar.enable_group_vectorization` to `off` to turn
   it off. Within it, the batch fold needs plain-column

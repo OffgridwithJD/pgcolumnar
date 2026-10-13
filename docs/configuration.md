@@ -59,8 +59,8 @@ disk. It never changes the values that a table returns.
 | `pgcolumnar.enable_custom_scan` | boolean | `on` | Use the columnar custom scan path for columnar tables. |
 | `pgcolumnar.enable_qual_pushdown` | boolean | `on` | Push scan qualifiers down so per-chunk min and max values can skip chunk groups. |
 | `pgcolumnar.enable_vectorization` | boolean | `on` | Use the vectorized aggregate path for supported ungrouped aggregates. |
-| `pgcolumnar.enable_group_vectorization` | boolean | `on` | Use the vectorized aggregate path for `GROUP BY` queries on a columnar table. The planner takes it only for an estimate of at most a tenth of `pgcolumnar.groupagg_max_groups` groups; see [how the grouped path stays safe on by default](#how-the-grouped-path-stays-safe-on-by-default). |
-| `pgcolumnar.groupagg_max_groups` | integer | `1000000` | Cap on the group count the grouped vectorized aggregate builds. Over the cap the query errors. The planner takes the grouped path only when it estimates at most a tenth of this. Range 1 to INT_MAX. |
+| `pgcolumnar.enable_group_vectorization` | boolean | `on` | Use the vectorized aggregate path for `GROUP BY` queries on a columnar table. The planner takes it only when the group count cannot exceed `pgcolumnar.groupagg_max_groups`; see [how the grouped path stays safe on by default](#how-the-grouped-path-stays-safe-on-by-default). |
+| `pgcolumnar.groupagg_max_groups` | integer | `1000000` | Cap on the group count the grouped vectorized aggregate builds. Over the cap the query errors. The planner takes the grouped path only when the group count cannot exceed this. Range 1 to INT_MAX. |
 | `pgcolumnar.enable_bloom_filter` | boolean | `on` | Skip chunk groups on equality filters using per-chunk bloom filters. |
 | `pgcolumnar.enable_join_runtime_filter` | boolean | `on` | Wrap a serial inner Hash Join so the build keys can skip fact-table groups and reject non-matching rows. Direct columnar scan only. Group skip needs the fact table clustered on the join key. On by default. |
 | `pgcolumnar.enable_read_stream` | boolean | `on` | Prefetch block reads with the read stream API. Effective on PostgreSQL 17 and later. |
@@ -217,17 +217,21 @@ HINT:  Raise pgcolumnar.groupagg_max_groups, or set pgcolumnar.enable_group_vect
 ```
 
 On by default, that error would reach tables nobody chose the path for. So the
-planner now takes the grouped path only when it estimates at most a tenth of the
-cap: 100,000 groups at the default. A query estimated above that runs the
-ordinary plan and succeeds. A table that grows past the limit moves to the
-ordinary plan, not to an error. The tenth leaves room for an estimate up
-to ten times too low. Group counts for `date_bin` and `date_trunc` keys are
-estimated from the time column's range.
+planner now takes the grouped path only when the group count cannot exceed the
+cap. It uses an upper bound, not an estimate:
 
-The error remains for an estimate that is wrong by more than that, for example
-from statistics taken before many new keys arrived. Run `ANALYZE`, raise the cap,
-or turn the setting off for that query. To keep more groups on the fast path,
-raise `pgcolumnar.groupagg_max_groups`: the limit rises with it.
+- the table's live row count, because no grouping makes more groups than rows;
+- for `date_bin` and `date_trunc` keys, the number of buckets the time column's
+  range allows, which is usually far smaller.
+
+A query over more rows than the cap, grouped by a plain key, runs the ordinary
+plan and succeeds. An estimate could not be the gate. On a key where one value
+fills half the table and the rest are unique, a fresh `ANALYZE` estimated 29,356
+groups for 2,000,001.
+
+The error remains possible only when something changes after planning: the cap
+is lowered, or the table grows past it. A prepared statement can see this. To keep larger
+tables on the fast path, raise `pgcolumnar.groupagg_max_groups`.
 
 ### Encode effort
 

@@ -914,11 +914,11 @@ EXPLAIN (ANALYZE) SELECT region, sum(amount) FROM events GROUP BY region;
 ```
 
 **Tuning.** The plan shows `Columnar Vectorized Group Keys` when the path is
-taken. The planner takes it only for an estimate of at most a tenth of
-`pgcolumnar.groupagg_max_groups` (default 1000000), so 100,000 groups. Raise the
-cap to keep more groups on the fast path. If statistics are stale and the real
-group count passes the cap, the query raises an error: run `ANALYZE`, or raise
-the cap.
+taken. The planner takes it only when the group count cannot exceed
+`pgcolumnar.groupagg_max_groups` (default 1000000). For a plain key the bound is
+the table's row count, so a table of more rows than the cap gets the ordinary
+plan. For time-bucket keys the bound is the number of buckets. Raise the cap to
+keep larger tables on the fast path.
 
 ## Count rows quickly
 

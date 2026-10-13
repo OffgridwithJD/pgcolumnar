@@ -827,16 +827,18 @@ A LEFT join stays on the core Agg plan.
 Grouped aggregation over a join is not this path.
 
 A separate path vectorizes `GROUP BY`. It is on by default
-(`pgcolumnar.enable_group_vectorization`), and the planner takes it only when it
-estimates at most a tenth of `pgcolumnar.groupagg_max_groups` groups. It covers
+(`pgcolumnar.enable_group_vectorization`). The planner takes it only when the
+group count cannot exceed `pgcolumnar.groupagg_max_groups`. The table's row count
+bounds it, and so do the time buckets for a time-bucket key. It covers
 `SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY <keys>` on one columnar
 relation. Each key must be non-volatile, hashable, and computable from that
 relation. A collatable key must use a deterministic collation. Each output must
 be a supported aggregate or a bare key reference. This path also accepts `sum`
 and `avg` on `bigint`, `numeric`, and floating-point columns, which the ungrouped
 path rejects. `pgcolumnar.groupagg_max_groups` caps the group count, default
-1,000,000. The cap is checked at execution against the real count. So a query
-whose estimate was more than ten times too low errors; it cannot switch plans. Run `ANALYZE`, raise the cap, or turn the path off.
+1,000,000. The cap is checked again at execution against the real count. A
+plan made before the cap was lowered, or before the table grew past it, errors
+there; it cannot switch plans. Raise the cap, or turn the path off.
 
 
 ## Join runtime filter
