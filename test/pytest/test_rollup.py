@@ -94,7 +94,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(_one(conn, "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute"
                            " WHERE attrelid = to_regclass('gauge_15m') AND attnum > 0 AND NOT attisdropped"),
                 "bucket,sensor,count,sum_reading,max_temp,avg_reading",
-                "premise: the rollup table exists with the documented columns")
+                "the rollup table exists with the documented columns")
 
     expect.text(_refresh(conn), "24000", "the first refresh folds every row")
     expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
@@ -120,7 +120,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     time.sleep(0.8)
     _load(conn, 28301, 28520, "2026-02-09 05:00:00+00")
     th.join(60)
-    expect.num(out.get("folded"), 400, "premise: the paused refresh folded what was there before it began")
+    expect.num(out.get("folded"), 400, "the paused refresh folded what was there before it began")
     expect.text(_refresh(conn), "220", "the next refresh folds the rows committed during the last one, once")
     expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
 
@@ -151,7 +151,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(_matches(conn, "z_utc"), _matches(conn, "z_stjohns"),
                 "refreshes from sessions in different time zones build the same rollup")
     expect.num(_one(conn, "SELECT count(*) FROM z_utc"), _one(conn, f"SELECT count(*) FROM ({RECOMPUTE}) z"),
-               "premise: the zone rollups hold a row per key of the recompute")
+               "the zone rollups hold a row per key of the recompute")
     expect.at_least(_one(conn, "SELECT count(*) FROM z_utc"), 1, "premise: and that is not zero")
 
     # Cost, on a source of real size.

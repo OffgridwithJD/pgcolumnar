@@ -71,7 +71,7 @@ oracle() { echo "$(exact "$RECOMPUTE")|t"; }
 
 AGGS="'{count,sum,min,max,avg}', '{*,v,v,v,f}'"
 q "SELECT pgcolumnar.create_rollup('r_hourly', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}', $AGGS);" >/dev/null
-check "premise: the rollup table exists with the documented columns" \
+check "the rollup table exists with the documented columns" \
 	"$(q "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
 	      WHERE attrelid = to_regclass('r_hourly') AND attnum > 0 AND NOT attisdropped;")" \
 	"bucket,dev,count,sum_v,min_v,max_v,avg_f"
@@ -99,7 +99,7 @@ refresher=$!
 sleep 1
 load 35001 35300 "2026-03-14 06:00:00+00"
 wait "$refresher"
-check "premise: the paused refresh folded what was there before it began" \
+check "the paused refresh folded what was there before it began" \
 	"$(sed -n 's/^folded=//p' "$PGC_WORKDIR/paused.out")" "500"
 check_num "the next refresh folds the rows committed during the last one, once" \
 	"$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "300"
@@ -125,7 +125,7 @@ done
 check "refreshes from sessions in different time zones build the same rollup" \
 	"$(exact "SELECT * FROM r_utc")" "$(exact "SELECT * FROM r_asia_kolkata")"
 # Empty equals empty: in the first red run both were, and the arm above passed.
-check_num "premise: the zone rollups hold a row per key of the recompute" \
+check_num "the zone rollups hold a row per key of the recompute" \
 	"$(q "SELECT count(*) FROM r_utc;")" "$(q "SELECT count(*) FROM ($RECOMPUTE) z;")"
 check_num "premise: and that is not zero" "$(at_least "$(q "SELECT count(*) FROM r_utc;")" 1)" "1"
 
