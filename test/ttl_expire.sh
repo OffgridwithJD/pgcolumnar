@@ -131,12 +131,23 @@ check "every remaining row reads back its own value" \
 AGAIN="$(q "SELECT pgcolumnar.expire('ttl_t')")"
 check "running it again retires nothing, because nothing new expired" "$AGAIN" "0"
 
+# SQLSTATE, not message text: the refusals below each have their own state, while a
+# missing function would be 42883 and a non-owner 42501. Empty when the call succeeds.
+ttl_state() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -v ON_ERROR_STOP=1 -Atq -v VERBOSITY=sqlstate -c "$1" 2>&1 \
+		| sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+
 # ---- a table with no declared retention ------------------------------------
 psql_run "CREATE TABLE ttl_none (id int, ts timestamptz) USING pgcolumnar;"
 psql_run "INSERT INTO ttl_none SELECT g, now() FROM generate_series(1,10) g;"
-ERR="$(q "SELECT pgcolumnar.expire('ttl_none')")"
+# BY SQLSTATE, AS THE PYTEST TWIN ASSERTS (#1339). The message grep accepted any
+# ERROR at all -- a missing function, a non-owner, an internal error -- so a refusal
+# raised as the wrong kind of failure passed. 55000 is the prerequisite-state check.
+_none_state="$(ttl_state "SELECT pgcolumnar.expire('ttl_none')")"
 check "a table with no declared retention is an error, not a silent success" \
-	"$(grep -qiE 'ERROR|no retention|ttl' <<<"$ERR" && echo "refused" || echo "ACCEPTED ($ERR)")" "refused"
+	"${_none_state:-ACCEPTED}" "55000"
 
 # ---- NULL in the retention column is a straddle, not an expiry ------------
 psql_run "CREATE TABLE ttl_null (id int, ts timestamptz, v text) USING pgcolumnar;"
@@ -235,13 +246,6 @@ check "index-only scan does not return rows expire already retired" "$IOS_AFTER"
 # A negative ttl_interval puts the cutoff in the FUTURE, so expire finds
 # `maximum < cutoff` true for groups entirely inside their retention and retires
 # them: live rows dropped, which is the failure this suite is named for.
-# SQLSTATE, not message text -- 22023 comes from the range check, while a
-# missing function would be 42883 and a non-owner 42501.
-ttl_state() {
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-		-d "$PGC_DB" -v ON_ERROR_STOP=1 -Atq -v VERBOSITY=sqlstate -c "$1" 2>&1 \
-		| sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
-}
 psql_run "CREATE TABLE ttl_neg (id int, ts timestamptz) USING pgcolumnar;"
 psql_run "INSERT INTO ttl_neg SELECT g, now() FROM generate_series(1,100) g;"
 check "a negative ttl_interval is refused with 22023" \
@@ -550,7 +554,7 @@ check "and they are the groups gone from the row-group catalog" "$(_rgs)" "4"
 psql_run "INSERT INTO ttl_rec SELECT now() + g * interval '1 second', g FROM generate_series(1001, 3000) g;
 	DELETE FROM ttl_rec WHERE v % 10 < 6 AND ts > now();
 	SELECT pgcolumnar.compact_rewrite('ttl_rec', 0.1);"
-check "premise: compact_rewrite retired a group" \
+check "compact_rewrite retired a group" \
 	"$([ "$(_rgs)" != "4,5,6" ] && echo retired || echo "nothing retired [$(_rgs)]")" "retired"
 check "a compaction's retired groups are not recorded as retention" "$(_rec)" "1,2,3"
 

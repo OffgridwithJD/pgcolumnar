@@ -502,22 +502,27 @@ def test_a_date_retention_column_truncates_toward_keeping(pgc_conn, expect):
         on_cutoff, 1,
         "premise: and rows dated exactly ON the cutoff, which decide the rounding")
 
-    state = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_dt')")
+    # THE CALL'S OWN ANSWER, AS THE SHELL TWIN READS IT (#1339). This used to discard
+    # it and call expire a second time, so "retires at least one group" was decided
+    # by the row count alone, and an expire that retired groups but reported 0 passed.
+    try:
+        first = _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_dt')")
+        state = ""
+    except psycopg.Error as exc:
+        first, state = None, exc.sqlstate or "?"
     expect.text(
         "accepted" if state == "" else f"refused ({state})",
         "accepted",
         "a date retention column is accepted, not refused (#1135)")
 
-    # Re-read after the call above, which ran it once.
-    retired = _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_dt')")
     rows_after = _one(pgc_conn, "SELECT count(*) FROM ttl_dt")
     live_after = _one(pgc_conn, f"SELECT count(*) FROM ttl_dt WHERE d >= {cutoff}")
     print(f"-- date: {rows_before} rows in {groups_before} groups, "
           f"{d_expired} past retention, {on_cutoff} on the cutoff")
-    print(f"-- date: rows left {rows_after}, second call retired {retired}")
+    print(f"-- date: expire returned {first}, rows left {rows_after}")
 
     expect.text(
-        "retired" if rows_after < rows_before else f"RETIRED NOTHING ({rows_after})",
+        "retired" if (first or 0) > 0 else f"RETIRED NOTHING ({first})",
         "retired",
         "expire on a date column retires at least one group")
     expect.num(
@@ -697,7 +702,7 @@ def test_expire_records_what_it_retires_and_nothing_else(pgc_conn, expect):
         cur.execute("DELETE FROM ttl_rr WHERE v % 10 < 6")
         cur.execute("SELECT pgcolumnar.compact_rewrite('ttl_rr', 0.1)")
     expect.text("retired" if rgs(sid) != "4,5" else "nothing retired [4,5]", "retired",
-                "premise: compact_rewrite retired a group")
+                "compact_rewrite retired a group")
     expect.text(rec(sid), "1,2,3", "a compaction's retired groups are not recorded as retention")
 
     pgc_conn.execute("DROP TABLE ttl_rr")

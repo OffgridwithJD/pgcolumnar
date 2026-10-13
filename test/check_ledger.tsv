@@ -2292,7 +2292,7 @@ ttl_expire	ttl_expire	premise: an index-only scan is chosen on the all-visible t
 ttl_expire	ttl_expire	premise: and every live row is past the retention	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: and rows dated exactly ON the cutoff, which decide the rounding	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: and the SAME row group holds expired rows and NULL ones	15;16;17;18;19	never	-
-ttl_expire	ttl_expire	premise: compact_rewrite retired a group	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	compact_rewrite retired a group	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: in UTC the fixture straddles that session's cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: in a zone on another date the fixture straddles that session's cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: no LIVE row holds a NULL retention value any more	15;16;17;18;19	never	-
