@@ -147,6 +147,7 @@ behaviour, the source of that number is named.
 - [99. test_suite_exit_trap.py: a suite's own EXIT trap must still stop its cluster](#99-test_suite_exit_trappy-a-suites-own-exit-trap-must-still-stop-its-cluster)
 - [100. test_tier_partition.py: tier_partition moves a cold partition to Parquet, exactly once](#100-test_tier_partitionpy-tier_partition-moves-a-cold-partition-to-parquet-exactly-once)
 - [101. test_prepared_writes.py: a write prepared and finished in one session leaves the backend alive](#101-test_prepared_writespy-a-write-prepared-and-finished-in-one-session-leaves-the-backend-alive)
+- [102. test_column_extent.py: the per-column extent is a true bound, recomputed whenever groups go](#102-test_column_extentpy-the-per-column-extent-is-a-true-bound-recomputed-whenever-groups-go)
 
 ## 1. How to read a test in here
 
@@ -6699,3 +6700,30 @@ Red on main, the first arm reading `lost`. Each of the two discards is red under
 | test | what it holds |
 | --- | --- |
 | `test_a_write_prepared_and_finished_in_one_session` | an insert, a delete and an update prepared and committed in one session, an insert prepared and rolled back, a write after COMMIT PREPARED, and an index fetch on each side of it, all answered by the same session; the server log gains no "terminated by signal"; no prepared transaction is left |
+
+## 102. test_column_extent.py: the per-column extent is a true bound, recomputed whenever groups go
+
+Port of `column_extent.sh` (#1304 option 5, for #1292 phase 2). `pgcolumnar.column_extent` keeps, per column, rows that are inserted and deleted but never updated. Each committing writer adds one row for the groups it flushed. A recompute over every zone map one snapshot sees replaces the rows that snapshot sees with one complete row. Every path that retires a group recomputes before commit. The planner uses the rows only when a complete one is visible, and their fold is then a true bound. `pgcolumnar.column_extent(rel, col)` shows that bound.
+
+THE ORACLE IS THE DATA: `min()` and `max()` of the column. Every equality arm first makes sure no group is left holding deleted rows, so the zone maps and the data agree. Twice, the first draft of an arm deleted rows that left a group partly live and so wider than the data, and the extent was right where the arm was wrong. The one case that may legitimately be wider, a rolled-back savepoint that flushed a group, is asserted as containment.
+
+Independent of the shell suite: its own row counts, values, times and helpers. The check names match, so `compare_to_bash` grades the pair one for one.
+
+WHAT WRITING IT FOUND:
+
+- **Ordinary writers never overlap.** Concurrent writers into one table are serialized by the storage-row lock (class 102) from their first flush to their commit. The concurrency arm therefore uses `parallel_copy`, whose loaders flush into one storage at once, each through PREPARE.
+- **COMMIT PREPARED crashes in the preparing session.** On main, `COMMIT PREPARED` in the session that prepared a pgcolumnar write crashes the backend (#1323), so this file commits from another session.
+- **The xact scan counters carry over.** `pg_stat_get_xact_numscans` reports a backend's pending stats, flushed about once a second rather than at transaction end. A measurement in the same connection as the writes counts their zone-map reads too, so the planning arm measures on a fresh connection.
+
+Written red first: the shell twin, against main, with the function absent (42883).
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_extent_is_the_columns_own_order` | `timestamptz`, `int` across 256 and negative, negative `numeric`, `date` and `text COLLATE "C"`: each column's extent is the data's min and max, over several row groups |
+| `test_the_planner_reads_the_extent_not_the_zone_maps` | planning a bucketed GROUP BY scans `zone_map` 0 times with a complete extent and 1 without, with the same estimate; with no rows the function returns none; the next writer recomputes one over every group |
+| `test_writers_concurrent_aborted_and_prepared` | `parallel_copy` with three loaders, an aborted writer, a rolled-back savepoint (containment), PREPARE and COMMIT PREPARED, and a table created in a rolled-back savepoint (no orphan rows) |
+| `test_a_shrink_is_recomputed_never_guessed` | after `expire`, `compact_rewrite` and VACUUM retire or rewrite groups, the extent equals the data left, and after `expire` it moved |
+| `test_no_complete_extent_where_the_zone_maps_cannot_give_one` | a column added after older groups, and a `point` column even after a recompute, get no complete extent |
+| `test_housekeeping_and_privilege` | fifty committing writers leave at most nine rows; TRUNCATE and DROP remove them; an ordinary role cannot read the catalog, nor the function without SELECT |

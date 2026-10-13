@@ -585,4 +585,7 @@ guard_tests 419
 #
 # cluster_tests 516 -> 517 for #1323's test_prepared_writes.py, one test, by collection
 # on this branch rebased onto 305e15e (#1317).
-cluster_tests 517
+#
+# cluster_tests 517 -> 523 for #1304 option 5's test_column_extent.py, six tests,
+# by collection on this branch rebased onto 036d452 (#1324).
+cluster_tests 523
