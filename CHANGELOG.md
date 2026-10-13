@@ -55,6 +55,16 @@ true until the next version shipped.
   on, the aged rows go, the fresh rows stay, and a table with no retention is never
   touched or named; a failing `expire` does not undo a compaction; and the daemon
   yields `expire`'s lock to an `ACCESS EXCLUSIVE` request within 8 s of a 30 s hold.
+- docs/how-to.md has recipes to fill gaps in a time series, carry the last value
+  forward (LOCF) and interpolate linearly (#1296). These need no feature: phase 0
+  on #1296 measured the gap fill at 0.69 s on 8.75M columnar rows, with the
+  vectorized grouped node still under the LEFT JOIN, and found the `hll` and
+  `tdigest` extensions already read through pgColumnar's scan. The recipes bucket
+  with `date_bin` and the series start as origin, not `date_trunc`: in a session
+  at a half-hour offset (Asia/Kolkata), `date_trunc` made every bucket empty.
+  `test/timeseries_recipes.sh` and an independent `test_timeseries_recipes.py`
+  read each recipe from the document and hold it to a reference computed another
+  way, over a fixture with leading, inner and trailing gaps and an all-NULL hour.
 
 - `test/format_downgrade.sh` and `test_format_downgrade.py` test #1137's promise
   with both real libraries. They build `v1.0-alpha4`, write with it, upgrade to the
