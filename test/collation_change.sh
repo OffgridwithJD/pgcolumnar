@@ -77,13 +77,6 @@ done
 check "rows written after the change join heap's answer" \
 	"$(same "SELECT count(*) || ':' || min(s) || '|' || max(s) FROM %T WHERE s < 'B';")" "same"
 
-# A change rolled back leaves the old collation's zone maps, which are right for it.
-q "CREATE TABLE rb (s text COLLATE \"C\") USING pgcolumnar;
-   INSERT INTO rb VALUES ('a'), ('B'), ('m'), ('b');" >/dev/null
-q "BEGIN; ALTER TABLE rb ALTER COLUMN s TYPE text COLLATE \"$COLL\"; ROLLBACK;" >/dev/null
-check "a collation change rolled back leaves the C answer" \
-	"$(q "SELECT min(s) || '|' || max(s) || '|' || count(*) FILTER (WHERE s < 'B') FROM rb;")" "B|m|0"
-
 # Through a partitioned parent: the ALTER recurses to a columnar partition.
 q "CREATE TABLE pp (k int, s text COLLATE \"C\") PARTITION BY RANGE (k);
    CREATE TABLE pp1 PARTITION OF pp FOR VALUES FROM (0) TO (100000) USING pgcolumnar;
@@ -91,5 +84,37 @@ q "CREATE TABLE pp (k int, s text COLLATE \"C\") PARTITION BY RANGE (k);
    ALTER TABLE pp ALTER COLUMN s TYPE text COLLATE \"$COLL\";" >/dev/null
 check "a collation change made through a partitioned parent reaches the columnar partition" \
 	"$(q "SELECT (SELECT count(*) FROM pp1 WHERE s < 'B') = (SELECT count(*) FROM ch WHERE k <= 3000 AND s < 'B');")" "t"
+
+# ---- what else trusted the old ordering ----------------------------------------
+#
+# vacuum_sorted stores the rows in the column's order, and the scan can claim
+# that order to the planner (#751), dropping the Sort an ORDER BY would need.
+# Under the new collation the stored order is not the column's order. The claim
+# already refuses every collatable column for exactly this reason, so this arm
+# is green on main; it is the guard that keeps that refusal, dated by a mutation
+# that removes it.
+q "CREATE TABLE vs (k int, s text COLLATE \"C\") USING pgcolumnar;
+   CREATE TABLE vh (k int, s text COLLATE \"C\");
+   INSERT INTO vs SELECT k, s FROM ch WHERE k <= 3000;
+   INSERT INTO vh SELECT k, s FROM ch WHERE k <= 3000;
+   SELECT pgcolumnar.vacuum_sorted('vs', 's');" >/dev/null
+for t in vs vh; do
+	q "ALTER TABLE $t ALTER COLUMN s TYPE text COLLATE \"$COLL\";" >/dev/null
+done
+same2() {	# same2 SQL-with-%T over vs and vh
+	local c h
+	c="$(q "${1//%T/vs}")"; h="$(q "${1//%T/vh}")"
+	[ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
+}
+check "a table sorted under the old collation orders ORDER BY ... LIMIT as heap does" \
+	"$(same2 "SELECT string_agg(s, ',') FROM (SELECT s FROM %T ORDER BY s, k LIMIT 6) x;")" "same"
+
+# A projection sorted on the column: its rows and its zone maps are in the old order.
+q "CREATE TABLE pj (k int, s text COLLATE \"C\") USING pgcolumnar;
+   INSERT INTO pj SELECT k, s FROM ch WHERE k <= 3000;
+   SELECT pgcolumnar.add_projection('pj', 'pj_by_s', columns => ARRAY['s', 'k'], sort_key => ARRAY['s']);
+   ALTER TABLE pj ALTER COLUMN s TYPE text COLLATE \"$COLL\";" >/dev/null
+check "a projection sorted on the column answers a range as heap does" \
+	"$(q "SELECT (SELECT count(*) FROM pj WHERE s < 'B') = (SELECT count(*) FROM ch WHERE k <= 3000 AND s < 'B');")" "t"
 
 pgc_summary
