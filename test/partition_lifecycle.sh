@@ -238,17 +238,79 @@ check "and the dropped partitions' pgcolumnar storage rows are gone" \
 check "premise: a second plan for the same cutoff is empty" \
 	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-15 00:00+00');")" "0"
 
-# A timestamp (no zone) key: the cutoff is read in the session's zone, as the key's
-# wall-clock time. 23:00 in New York is 04:00 the next day in UTC, so a cutoff read
-# in UTC would retire dw_a at the second cutoff too.
+# The cutoff's type must be the key's (jdatcmd, #1297): a timestamp bound compared
+# with a timestamptz cutoff converts in the session's zone, so the same call could
+# plan differently from two sessions. A cutoff of the other type is refused
+# (42804), and a matching one plans the same everywhere.
 q "CREATE TABLE dw (ts timestamp NOT NULL) PARTITION BY RANGE (ts);
    CREATE TABLE dw_a PARTITION OF dw FOR VALUES FROM ('2021-01-01') TO ('2021-01-02') USING pgcolumnar;
    CREATE TABLE dw_b PARTITION OF dw FOR VALUES FROM ('2021-01-02') TO ('2021-01-03') USING pgcolumnar;" >/dev/null
-check "a timestamp key's bounds are compared in the session's wall-clock time" \
-	"$(env PGTZ=America/New_York PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
-	   -c "SELECT coalesce(string_agg(s, ';'), 'none') FROM pgcolumnar.partition_drop_plan('dw', '2021-01-02 00:00-05') s" \
-	   -c "SELECT coalesce(string_agg(s, ';'), 'none') FROM pgcolumnar.partition_drop_plan('dw', '2021-01-01 23:00-05') s" 2>&1 | paste -sd'|')" \
-	"ALTER TABLE public.dw DETACH PARTITION public.dw_a CONCURRENTLY;DROP TABLE public.dw_a|none"
+plan_in() {	# plan_in ZONE PARENT CUTOFF-EXPRESSION
+	env PGTZ="$1" PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-c "SELECT coalesce(string_agg(s, ';'), 'none') FROM pgcolumnar.partition_drop_plan('$2', $3) s" 2>&1
+}
+check "a timestamp key's plan for a timestamp cutoff is the same from sessions west and east of UTC" \
+	"$(plan_in America/Los_Angeles dw "'2021-01-02 00:00'::timestamp")|$(plan_in Asia/Kolkata dw "'2021-01-02 00:00'::timestamp")" \
+	"ALTER TABLE public.dw DETACH PARTITION public.dw_a CONCURRENTLY;DROP TABLE public.dw_a|ALTER TABLE public.dw DETACH PARTITION public.dw_a CONCURRENTLY;DROP TABLE public.dw_a"
+check "a cutoff of the other timestamp type is refused" \
+	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dw', '2021-01-02 00:00+00'::timestamptz)")|$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-01 00:00'::timestamp)")" \
+	"42804|42804"
+
+# Bounds at the ends of the range: MINVALUE below is listed once its upper bound
+# is past, MAXVALUE above never is.
+q "CREATE TABLE dm (ts timestamptz NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE dm_lo PARTITION OF dm FOR VALUES FROM (MINVALUE) TO ('2020-01-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dm_mid PARTITION OF dm FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dm_hi PARTITION OF dm FOR VALUES FROM ('2020-02-01 00:00+00') TO (MAXVALUE) USING pgcolumnar;" >/dev/null
+check "a partition from MINVALUE is listed once its upper bound is past, one to MAXVALUE never" \
+	"$(q "SELECT string_agg(s, ';') FROM pgcolumnar.partition_drop_plan('dm', '2020-01-01 00:00+00') s WHERE s LIKE 'DROP%';")|$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dm', 'infinity') s WHERE s LIKE '%dm_hi%';")" \
+	"DROP TABLE public.dm_lo|0"
+
+# Names that need quoting, in a schema that needs quoting: the plan must run as
+# returned (#1317 was caught by exactly this).
+q "CREATE SCHEMA \"Drop Zone\";
+   CREATE TABLE \"Drop Zone\".\"Metrics\" (ts timestamptz NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE \"Drop Zone\".\"Old Part\" PARTITION OF \"Drop Zone\".\"Metrics\"
+     FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE \"Drop Zone\".\"New Part\" PARTITION OF \"Drop Zone\".\"Metrics\"
+     FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;" >/dev/null
+run_plan '"Drop Zone"."Metrics"' '2020-02-01 00:00+00'
+check "a plan for names that need quoting runs as returned" \
+	"$(q "SELECT string_agg(c.relname, ',') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	      WHERE n.nspname = 'Drop Zone' AND c.relkind IN ('r', 'p');")" "Metrics,New Part"
+
+# A partition that is itself partitioned is listed whole: the concurrent detach
+# takes it with its children, and DROP drops them.
+q "CREATE TABLE ds (ts timestamptz NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE ds_q1 PARTITION OF ds FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-04-01 00:00+00') PARTITION BY RANGE (ts);
+   CREATE TABLE ds_q1_a PARTITION OF ds_q1 FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-15 00:00+00') USING pgcolumnar;
+   CREATE TABLE ds_q1_b PARTITION OF ds_q1 FOR VALUES FROM ('2020-02-15 00:00+00') TO ('2020-04-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE ds_q2 PARTITION OF ds FOR VALUES FROM ('2020-04-01 00:00+00') TO ('2020-07-01 00:00+00') USING pgcolumnar;
+   INSERT INTO ds SELECT '2020-01-01 00:00+00'::timestamptz + g * interval '1 day' FROM generate_series(0, 180) g;" >/dev/null
+check "a partition that is itself partitioned is planned whole" \
+	"$(plan ds '2020-04-01 00:00+00' | paste -sd';')" \
+	"ALTER TABLE public.ds DETACH PARTITION public.ds_q1 CONCURRENTLY;DROP TABLE public.ds_q1"
+run_plan ds '2020-04-01 00:00+00'
+check "and running the plan drops it with its children" \
+	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('ds_q1', 'ds_q1_a', 'ds_q1_b');")|$(q "SELECT count(*) FROM ds;")" \
+	"0|$(q "SELECT count(*) FROM generate_series(0, 180) g WHERE '2020-01-01 00:00+00'::timestamptz + g * interval '1 day' >= '2020-04-01 00:00+00';")"
+
+# A partition tier_partition moved to Parquet (#1295) is a foreign table: it is
+# listed like any other, dropped with DROP FOREIGN TABLE, and its file stays.
+psql_run "CREATE SERVER drop_pq FOREIGN DATA WRAPPER pgcolumnar_parquet;"
+q "CREATE TABLE dt (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);
+   CREATE TABLE dt_jan PARTITION OF dt FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dt_feb PARTITION OF dt FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;
+   INSERT INTO dt SELECT '2020-01-01 00:00+00'::timestamptz + g * interval '1 hour', g FROM generate_series(0, 1400) g;" >/dev/null
+mkdir -p "$PGC_WORKDIR/drop" && chmod 777 "$PGC_WORKDIR/drop"
+check "premise: the January partition was tiered to Parquet" \
+	"$(q "SELECT pgcolumnar.tier_partition('dt_jan', 'drop_pq', '$PGC_WORKDIR/drop/dt_jan.parquet');")|$(q "SELECT relkind FROM pg_class WHERE relname = 'dt_jan';")" "744|f"
+check "a tiered partition is planned with DROP FOREIGN TABLE" \
+	"$(plan dt '2020-02-01 00:00+00' | paste -sd';')" \
+	"ALTER TABLE public.dt DETACH PARTITION public.dt_jan CONCURRENTLY;DROP FOREIGN TABLE public.dt_jan"
+run_plan dt '2020-02-01 00:00+00'
+check "and running it drops the foreign table and leaves its Parquet file" \
+	"$(q "SELECT count(*) FROM pg_class WHERE relname = 'dt_jan';")|$([ -s "$PGC_WORKDIR/drop/dt_jan.parquet" ] && echo file-kept || echo file-gone)" "0|file-kept"
 
 # An interrupted concurrent detach leaves the partition pending: a transaction
 # holding an older snapshot makes the second phase wait, and a statement timeout
