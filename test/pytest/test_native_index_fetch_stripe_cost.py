@@ -73,7 +73,7 @@ def test_native_index_fetch_stripe_cost(pgc_conn, expect):
         cur.execute("CREATE INDEX ct_id ON ct (id)")
         cur.execute("ANALYZE ct")
         cur.execute("SELECT count(*) FROM ct")
-        expect.num(cur.fetchone()[0], n, f"premise: the table holds all {n} rows")
+        expect.num(cur.fetchone()[0], n, "premise: the table holds all 200000 rows")
 
     _set_limit(pgc_conn, SMALL)
     type1, c1, plan1 = _top(pgc_conn)
@@ -94,13 +94,14 @@ def test_native_index_fetch_stripe_cost(pgc_conn, expect):
         "(c1 is a number)",
     )
 
-    # SAME SHAPE ON BOTH ARMS, ASSERTED BEFORE THE PRICES ARE COMPARED. See the
+    # SAME SHAPE ON BOTH ARMS, ASSERTED BEFORE THE PRICES ARE COMPARED. Arms, not
+    # premises (#1339, #1236): the planner's choice is repository behaviour. See the
     # module docstring: two costs also differ when the plan flipped, and then the
     # comparison is about node selection rather than about the penalty's arithmetic.
-    expect.text(type2, type1, "premise: both arms priced the same plan shape")
+    expect.text(type2, type1, "both arms priced the same plan shape")
     expect.plan_node(
         plan1, node_type="Index Scan",
-        name="premise: the priced plan is the per-row index fetch the penalty prices",
+        name="the priced plan is the per-row index fetch the penalty prices",
     )
 
     expect.differ(
@@ -119,7 +120,7 @@ def test_native_index_fetch_stripe_cost(pgc_conn, expect):
     print(f"-- penalty off: {SMALL} -> {off_small} ; {LARGE} -> {off_large}")
     expect.num(
         off_small, off_large,
-        "premise: with the fetch penalty off the option reaches no other cost term",
+        "with the fetch penalty off the option reaches no other cost term",
     )
 
     with pgc_conn.cursor() as cur:
