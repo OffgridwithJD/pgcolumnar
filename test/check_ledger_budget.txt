@@ -1443,4 +1443,18 @@ suites_not_covered 247
 #     never         1698 +  2 = 1700
 #     dated          361 +  8 =  369
 #     1700 + 369 == 2069
-checks_never_observed_red 1700
+#
+# #1321, a suite's own EXIT trap must still stop its cluster (OffgridwithJD):
+# 1700 -> 1701. Selftest part 620 enters with 5 checks from a five-major
+# harness_selftest run (1228/1228 on each of 15-19). Four arms are dated: the
+# population arm by the run before the fix (native_upgrade_converge.sh's cleanup
+# without pgc_on_exit), the three detector arms by five mutations of the
+# detector. The fifth, 'premise: pgc_setup still arms the trap this part
+# protects', is a fact about lib.sh, the fixture this part reads, and arrives
+# never.
+#
+#     ledger rows   2069 + 5 = 2074
+#     never         1700 + 1 = 1701
+#     dated          369 + 4 =  373
+#     1701 + 373 == 2074
+checks_never_observed_red 1701
