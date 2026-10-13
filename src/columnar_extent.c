@@ -25,8 +25,10 @@
  * complete row R (computed at snapshot B, committed before S): the groups S sees
  * were either visible at B, and so are in R, or committed between B and S, in
  * which case their writer's own row committed with them and S sees it. A retire
- * and its recompute are one transaction, so S sees both or neither. Otherwise
- * the caller falls back to the zone maps.
+ * and its recompute are one transaction, so S sees both or neither. The
+ * reader's own transaction adds its pending fold, since its groups are visible
+ * to it before its row is written. Otherwise the caller falls back to the zone
+ * maps.
  *
  * A ROLLED-BACK SUBTRANSACTION that flushed a group leaves its values in the
  * fold: wider than the data, which only over-estimates.
@@ -439,6 +441,12 @@ PgColumnarExtentPreCommit(void)
  *		The column's bound as the snapshot sees it, when a complete row is
  *		visible. false: no trustworthy extent, fall back to the zone maps.
  *		*hasValues false: the column holds no non-NULL value.
+ *
+ *		THE CALLER'S OWN TRANSACTION sees the groups it has flushed, but its
+ *		extent row is written only at pre-commit, so the visible rows alone would
+ *		leave those groups out and bound the column too narrowly. Its pending fold
+ *		is added in. Groups it has retired are still in the visible rows until
+ *		its recompute commits: wider than the data, which only over-estimates.
  */
 bool
 PgColumnarExtentBound(Relation rel, int columnIndex, Snapshot snapshot,
@@ -448,12 +456,14 @@ PgColumnarExtentBound(Relation rel, int columnIndex, Snapshot snapshot,
 	List	   *rows;
 	ListCell   *lc;
 	bool		complete = false;
+	uint64		storageId;
 
 	if (columnIndex < 0 || columnIndex >= RelationGetDescr(rel)->natts ||
 		!PgColumnarExtentCatalogPresent())
 		return false;
 	att = TupleDescAttr(RelationGetDescr(rel), columnIndex);
-	rows = PgColumnarReadExtentRows(PgColumnarStorageId(rel), columnIndex, snapshot);
+	storageId = PgColumnarStorageId(rel);
+	rows = PgColumnarReadExtentRows(storageId, columnIndex, snapshot);
 	*hasValues = false;
 	foreach(lc, rows)
 	{
@@ -471,6 +481,24 @@ PgColumnarExtentBound(Relation rel, int columnIndex, Snapshot snapshot,
 		if (!*hasValues || extent_cmp(att, rmx, *maximum) > 0)
 			*maximum = rmx;
 		*hasValues = true;
+	}
+	if (complete && extent_pending != NULL)
+	{
+		ExtentKey	key;
+		ExtentEntry *e;
+
+		memset(&key, 0, sizeof(key));
+		key.storageId = storageId;
+		key.columnIndex = columnIndex;
+		e = (ExtentEntry *) hash_search(extent_pending, &key, HASH_FIND, NULL);
+		if (e != NULL)
+		{
+			if (!*hasValues || extent_cmp(att, e->minimum, *minimum) < 0)
+				*minimum = e->minimum;
+			if (!*hasValues || extent_cmp(att, e->maximum, *maximum) > 0)
+				*maximum = e->maximum;
+			*hasValues = true;
+		}
 	}
 	return complete;
 }
