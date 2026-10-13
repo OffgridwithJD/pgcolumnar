@@ -2553,8 +2553,8 @@ BEGIN
 	-- ONE statement, so one snapshot, for all of it:
 	--   * the groups. A recorded group that expire retired (keep history, the
 	--     owner's decision on #1294) leaves the record and its range joins the
-	--     rollup's history. Any other recorded group that is gone, or whose row
-	--     or deleted count moved, is CHANGED.
+	--     rollup's history. Any other recorded group that is gone, or whose
+	--     deleted count moved, is CHANGED.
 	--   * the dirty buckets: every bucket a changed group's recorded range covers,
 	--     and the NULL bucket when it had rows without a ts. Their partials are
 	--     deleted and recomputed from the source's live rows.
@@ -2584,8 +2584,7 @@ BEGIN
 				   c.row_count AS now_rows, c.deleted_count AS now_deleted
 			  FROM rec rg LEFT JOIN cur c USING (group_number)
 			 WHERE rg.group_number NOT IN (SELECT t.group_number FROM ret t)
-			   AND (c.group_number IS NULL OR c.row_count <> rg.row_count
-					OR c.deleted_count <> rg.deleted_count)
+			   AND (c.group_number IS NULL OR c.deleted_count <> rg.deleted_count)
 		), dirty AS (
 			SELECT coalesce(range_agg(tstzrange(date_bin(%4$L::interval, ch.ts_min, %6$L::timestamptz),
 												date_bin(%4$L::interval, ch.ts_max, %6$L::timestamptz)
