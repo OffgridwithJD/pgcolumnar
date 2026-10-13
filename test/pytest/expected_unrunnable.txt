@@ -60,3 +60,11 @@
 15 test_tier_partition.py::test_tier_partition_moves_a_virtual_generated_column
 16 test_tier_partition.py::test_tier_partition_moves_a_virtual_generated_column
 17 test_tier_partition.py::test_tier_partition_moves_a_virtual_generated_column
+# PostgreSQL 15 to 19: UPDATE ... FOR PORTION OF is not in the grammar. 19beta2 had
+# it and 19beta4 removed it (#1337); the test probes the grammar, not the major,
+# so a server that has the clause runs it, and this file would then refuse the row.
+15 test_temporal.py::test_for_portion_of
+16 test_temporal.py::test_for_portion_of
+17 test_temporal.py::test_for_portion_of
+18 test_temporal.py::test_for_portion_of
+19 test_temporal.py::test_for_portion_of
