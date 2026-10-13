@@ -143,6 +143,7 @@ behaviour, the source of that number is named.
 - [95. test_docs_how_to_sections.py: the pg_partman how-to keeps its own heading](#95-test_docs_how_to_sectionspy-the-pg_partman-how-to-keeps-its-own-heading)
 - [96. test_autovacuum_expire.py: the daemon expires retention tables only when told to](#96-test_autovacuum_expirepy-the-daemon-expires-retention-tables-only-when-told-to)
 - [97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute](#97-test_rolluppy-incremental-rollups-fold-appended-row-groups-and-equal-a-full-recompute)
+- [98. test_timeseries_recipes.py: the gap-fill, LOCF and interpolation recipes answer what they claim](#98-test_timeseries_recipespy-the-gap-fill-locf-and-interpolation-recipes-answer-what-they-claim)
 
 ## 1. How to read a test in here
 
@@ -6619,3 +6620,22 @@ Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation 
 | test | what it holds |
 | --- | --- |
 | `test_rollup_phase_one` | the rollup equals a full recompute after the first refresh, appends with late rows, a bulk append, and a rebase; a refresh with nothing new folds nothing; rows committed during a refresh are folded by the next, once; two concurrent refreshes fold each row once; zones agree; a refresh after a small append reads under a fifth of the source; a rewritten source is refused until `rebase_rollup`; a delete is refused (phase 1); a heap rollup behaves the same; REPEATABLE READ is refused; an owner who is not a superuser creates and refreshes a rollup, and another role sees none of it; bad definitions are refused with `22023` |
+
+## 98. test_timeseries_recipes.py: the gap-fill, LOCF and interpolation recipes answer what they claim
+
+Port of `timeseries_recipes.sh` (#1296). Phase 0 on #1296 found that core SQL expresses gap filling, last observation carried forward and linear interpolation fast enough on columnar, so the deliverable is three recipes in `docs/how-to.md`, and this file holds each one to a reference.
+
+THE RECIPES ARE READ FROM THE DOCUMENT, as the shell suite reads them: the first `sql` block under each heading, run as written against the table the document names. Everything else is this file's own. The rows are generated in Python, and the reference is computed in Python from those same rows, so it shares nothing with the shell suite's plpgsql reference. `compare_to_bash` grades the pair 10 of 10.
+
+THE FIXTURE holds an empty first hour, a run of empty hours, an hour with some NULL values, an hour of only NULL values and two empty last hours. Values grow as the square of the hour, so a line through the wrong neighbours lands on the wrong value.
+
+THE HALF-HOUR ZONE ARM is why the recipes bucket with `date_bin` and an explicit origin. `date_trunc` truncates in the session's zone, so in Asia/Kolkata its buckets start at :30 UTC. With `date_trunc` in the document, this arm read all 24 buckets as NULL.
+
+Red first: on main the how-to has no recipes, so the premise reads 0 and the comparisons get nothing.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_recipes_are_in_the_how_to` | each of the three headings has a `sql` block naming `readings` |
+| `test_each_recipe_matches_the_reference` | the table is columnar; the gap fill, LOCF and interpolation match the Python reference for all 24 hours; the gap fill gives the same buckets in an Asia/Kolkata session; its aggregate runs as the vectorized grouped node when that is on |

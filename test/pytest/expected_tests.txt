@@ -574,4 +574,7 @@ guard_tests 415
 #
 # cluster_tests 510 -> 511 for #1294's test_rollup.py, one test, collected over the
 # cluster files on this branch rebased onto b6656ac (#1307).
-cluster_tests 511
+#
+# cluster_tests 511 -> 513 for #1296's test_timeseries_recipes.py, two tests, by collection
+# on this branch rebased onto 024e737.
+cluster_tests 513

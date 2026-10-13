@@ -342,6 +342,115 @@ the time zone your sessions use. For a cutoff in your session's time zone, run
 `pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
 set `ttl_interval` to a span no row will reach.
 
+## Fill gaps in a time series
+
+A bucketed query returns no row for a bucket with no data. These three recipes
+return a row for every bucket, then fill the empty ones. They are plain SQL, so
+they need nothing beyond pgColumnar.
+
+The examples use a table `readings (ts timestamptz, v float8)` and one-hour
+buckets over one day. To adapt one, change the table, the column names, the
+range and the width. Keep the origin of `date_bin` equal to the start of the
+series, so every bucket the aggregate makes is a bucket the series has.
+
+`date_bin` with an explicit origin does not depend on the session's time zone.
+`date_trunc('hour', ts)` does: in a zone with a half-hour offset, its buckets
+start at half past the hour and match no bucket in the series.
+
+### Fill empty buckets
+
+Join the bucketed aggregate to a series of every bucket. An empty bucket
+returns `NULL`.
+
+```sql
+SELECT b.bucket, a.avg_v
+  FROM generate_series(timestamptz '2026-10-01 00:00+00',
+                       timestamptz '2026-10-01 23:00+00',
+                       interval '1 hour') AS b(bucket)
+  LEFT JOIN (SELECT date_bin(interval '1 hour', ts, timestamptz '2026-10-01 00:00+00') AS bucket,
+                    avg(v) AS avg_v
+               FROM readings
+              GROUP BY 1) AS a USING (bucket)
+ ORDER BY b.bucket;
+```
+
+With `pgcolumnar.enable_group_vectorization` on, the aggregate under the join
+runs as the vectorized grouped node.
+
+### Carry the last value forward
+
+Last observation carried forward (LOCF) fills an empty bucket with the value of
+the latest bucket before it that has one. A running count of non-null values
+puts each empty bucket in the same group as the last known value, and
+`first_value` reads that value.
+
+```sql
+WITH filled AS (
+SELECT b.bucket, a.avg_v
+  FROM generate_series(timestamptz '2026-10-01 00:00+00',
+                       timestamptz '2026-10-01 23:00+00',
+                       interval '1 hour') AS b(bucket)
+  LEFT JOIN (SELECT date_bin(interval '1 hour', ts, timestamptz '2026-10-01 00:00+00') AS bucket,
+                    avg(v) AS avg_v
+               FROM readings
+              GROUP BY 1) AS a USING (bucket)
+), grouped AS (
+  SELECT bucket, avg_v, count(avg_v) OVER (ORDER BY bucket) AS grp
+    FROM filled
+)
+SELECT bucket, avg_v,
+       first_value(avg_v) OVER (PARTITION BY grp ORDER BY bucket) AS avg_v_locf
+  FROM grouped
+ ORDER BY bucket;
+```
+
+A bucket before the first value stays `NULL`, because there is nothing to
+carry. A bucket whose rows all have `v` null has an average of `NULL`, so it
+counts as empty and is filled.
+
+### Interpolate between known values
+
+Linear interpolation fills an empty bucket on the straight line between the
+known buckets on either side. A running count in each direction finds both
+neighbours.
+
+```sql
+WITH filled AS (
+SELECT b.bucket, a.avg_v
+  FROM generate_series(timestamptz '2026-10-01 00:00+00',
+                       timestamptz '2026-10-01 23:00+00',
+                       interval '1 hour') AS b(bucket)
+  LEFT JOIN (SELECT date_bin(interval '1 hour', ts, timestamptz '2026-10-01 00:00+00') AS bucket,
+                    avg(v) AS avg_v
+               FROM readings
+              GROUP BY 1) AS a USING (bucket)
+), marks AS (
+  SELECT bucket, avg_v,
+         count(avg_v) OVER (ORDER BY bucket) AS g_prev,
+         count(avg_v) OVER (ORDER BY bucket DESC) AS g_next
+    FROM filled
+), ends AS (
+  SELECT bucket, avg_v,
+         first_value(bucket) OVER (PARTITION BY g_prev ORDER BY bucket) AS prev_t,
+         first_value(avg_v)  OVER (PARTITION BY g_prev ORDER BY bucket) AS prev_v,
+         first_value(bucket) OVER (PARTITION BY g_next ORDER BY bucket DESC) AS next_t,
+         first_value(avg_v)  OVER (PARTITION BY g_next ORDER BY bucket DESC) AS next_v
+    FROM marks
+)
+SELECT bucket,
+       CASE WHEN avg_v IS NOT NULL THEN avg_v
+            WHEN prev_v IS NULL OR next_v IS NULL THEN NULL
+            ELSE prev_v + (next_v - prev_v)
+                 * extract(epoch FROM bucket - prev_t)
+                 / extract(epoch FROM next_t - prev_t)
+       END AS avg_v_interp
+  FROM ends
+ ORDER BY bucket;
+```
+
+A bucket before the first value or after the last one stays `NULL`, because it
+has a neighbour on one side only.
+
 ## Create time partitions ahead
 
 `pgcolumnar.partition_create_ahead` keeps a time-partitioned table ready for
