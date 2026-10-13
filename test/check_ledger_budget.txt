@@ -1428,4 +1428,23 @@ suites_not_covered 247
 #     never         1686 + 12 = 1698
 #     dated          317 + 44 =  361
 #     1698 + 361 == 2059
-checks_never_observed_red 1698
+#
+# #1295 / PR #1317 (OffgridwithJD): 1698 -> 1731. tier_partition enters the
+# ledger with 71 checks from a five-major run on this tree. Thirty-eight are
+# dated by nineteen mutations of tier_partition (and the generation mutation
+# again on PG18, where the virtual-column arm runs), each merged one log at a
+# time with --mutation and --target; no premise is among them (four checks a
+# mutation reddened were renamed from premises first, #1236). Thirty-three
+# arrive `never`: fifteen premises, and eighteen arms -- eleven that hold because
+# plpgsql is transactional (the five fault arms, their five no-foreign-table
+# companions, the rollback), six that test behaviour of core's the docs promise
+# (two pruning arms, the refused insert, the parent's lock, the race, the READ
+# COMMITTED row), and one whose refusal comes from export_parquet (a partition
+# that is not columnar). Restated on main after #1319; the 71 rows are
+# unchanged from 663bf84.
+#
+#     ledger rows   2059 + 71 = 2130
+#     never         1698 + 33 = 1731
+#     dated          361 + 38 =  399
+#     1731 + 399 == 2130
+checks_never_observed_red 1731

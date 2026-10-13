@@ -574,4 +574,6 @@ guard_tests 415
 #
 # cluster_tests 510 -> 511 for #1294's test_rollup.py, one test, collected over the
 # cluster files on this branch rebased onto b6656ac (#1307).
-cluster_tests 511
+# 511 -> 514 for #1295's test_tier_partition.py (three tests), collected over the
+# cluster files on this branch rebased onto 024e737 (#1319).
+cluster_tests 514
