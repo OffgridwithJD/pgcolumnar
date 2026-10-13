@@ -585,6 +585,37 @@ def membership_report(directory=None, declared=None):
     return "[]" if not bad else "[%d: %s]" % (len(bad), " ".join(bad))
 
 
+def test_a_declared_file_that_needs_the_driver_is_named_as_such(expect, tmp_path):
+    """The `needs-the-driver` kind, which the real corpus cannot reach (#1339).
+
+    No declared file in the tree needs the driver, so the arm over the real
+    declaration never takes this branch. Deleting it would report "[]" for a file
+    the job cannot run, and the job would then fail with no named cause.
+    """
+    d = _fake_corpus(tmp_path, {
+        "test_drives_inner.py":
+            "def test_x(pytester):\n"
+            "    pytester.makepyfile('import psycopg\\ndef test_y(): pass\\n')\n",
+        "test_plain.py": "def test_z():\n    assert True\n"})
+    expect.text(
+        membership_report(d, ["test_drives_inner.py", "test_plain.py"]),
+        "[1: needs-the-driver:test_drives_inner.py]",
+        "a declared file whose inner run imports the driver is named, and only it")
+    expect.text(membership_report(d, ["test_plain.py"]), "[]",
+                "control: declaring only the driver-free file is agreement")
+
+
+def test_the_partition_mode_prints_both_halves(expect, tmp_path, capsys):
+    """`--partition` is the command line selftest 350 can call; nothing ran it."""
+    d = _fake_corpus(tmp_path, {
+        "test_free.py": "def test_a():\n    assert True\n",
+        "test_bound.py": "def test_b(pgc_conn):\n    pass\n"})
+    expect.num(_main(["--partition", str(d)]), 0, "the mode exits 0")
+    expect.text(capsys.readouterr().out.strip(),
+                "free: test_free.py | bound: test_bound.py",
+                "and prints each file in the half it belongs to")
+
+
 def test_the_declaration_names_each_file_once(expect):
     """`membership_report` compares SETS, so it cannot see a name listed twice.
 
@@ -719,18 +750,25 @@ def test_a_cluster_test_still_needs_the_driver(expect, pytestconfig):
 def test_conftest_imports_no_database_driver_at_module_scope(expect):
     """The regression named directly, because the behavioural arm above is slow
     and a reader changing conftest deserves to be told in one line."""
-    src = (HERE / "conftest.py").read_text()
-    module_scope = [
-        ln for ln in src.splitlines()
-        if ln.startswith("import psycopg") or ln.startswith("from psycopg")
-    ]
-    expect.text(", ".join(module_scope) or "none", "none",
+    # ONE READER FOR THE ARM AND ITS CONTROLS (#1339). The arm used to filter lines
+    # starting `import psycopg`, which misses `import os, psycopg` and an import
+    # indented under `if`/`try`/`with` -- all module scope, all fatal to collection.
+    # And its premise re-typed that filter over a literal, so breaking the arm's
+    # reader left the premise green. Both now call the module's AST reader.
+    def reads_driver_import(src):
+        return _imports_driver(_module_scope(ast.parse(src)))
+
+    expect.text(repr(reads_driver_import((HERE / "conftest.py").read_text())), "False",
                 "conftest.py imports no database driver at module scope")
-    # PREMISE: the check can see an import at all -- otherwise "none" is what a
-    # broken reader says too.
-    fake = "import os\nimport psycopg\n"
-    seen = [ln for ln in fake.splitlines() if ln.startswith("import psycopg")]
-    expect.num(len(seen), 1, "premise: the reader recognises a module-scope import")
+    for src in ("import os\nimport psycopg\n",
+                "import os, psycopg\n",
+                "from psycopg import sql\n",
+                "try:\n    import psycopg\nexcept ImportError:\n    pass\n"):
+        expect.text(repr(reads_driver_import(src)), "True",
+                    f"the reader sees a module-scope import in {src.splitlines()[-1]!r}"
+                    if "try" not in src else "the reader sees an import inside try")
+    expect.text(repr(reads_driver_import("def f():\n    import psycopg\n")), "False",
+                "control: an import inside a def is deferred, not module scope")
 
 
 # ---- the declaration must be DECIDED, in both directions ---------------------
@@ -892,6 +930,23 @@ def test_the_gate_runs_the_membership_decision_rather_than_only_this_file(expect
     expect.at_least(bad.stderr.count("usage:"), 1, "and says how to call it instead")
 
 
+def _ci_job(text, name):
+    """One job's text, from its key to the NEXT job key (#1339).
+
+    Cutting at "\n  build:" instead took pytest-cluster along with pytest-guards,
+    because build is not the job after it. The cluster job's own `pip show psycopg`,
+    which asserts PRESENCE, then satisfied the guard job's absence check.
+    """
+    start = text.index(f"\n  {name}:\n") + 1
+    nxt = re.search(r"\n  [A-Za-z][\w-]*:\n", text[start + 1:])
+    return text[start:start + 1 + nxt.start() + 1] if nxt else text[start:]
+
+
+def _code_lines(job):
+    """The job's lines with YAML comments dropped, so prose cannot satisfy a check."""
+    return [l for l in job.splitlines() if not l.lstrip().startswith("#")]
+
+
 def test_ci_derives_the_file_list_rather_than_repeating_it(expect):
     """CI must ask this module for NO_CLUSTER, not carry its own copy.
 
@@ -908,15 +963,21 @@ def test_ci_derives_the_file_list_rather_than_repeating_it(expect):
     expect.text(repr(ci.is_file()), "True", "premise: ci.yml is where this expects")
     text = ci.read_text()
 
-    expect.at_least(text.count("from test_harness_deps import NO_CLUSTER"), 1,
-                    "the job derives the file list from this module")
-    expect.at_least(text.count("requirements-test.txt"), 1,
-                    "and the pins from requirements-test.txt")
+    # IN THIS JOB, ON THE LINE THAT SETS THE VALUE (#1339). Counted over the whole
+    # file, both held while the job listed `ls test_*.py` and pinned by hand: the
+    # cluster job and the comment above this one carry the same strings.
+    job = _ci_job(text, "pytest-guards")
+    expect.num(job.count("\n  pytest-cluster:"), 0,
+               "the guard job's slice ends before the cluster job")
+    files = [l for l in _code_lines(job) if l.strip().startswith("FILES=")]
+    pins = [l for l in _code_lines(job) if l.strip().startswith("PINS=")]
+    expect.num(len([l for l in files if "from test_harness_deps import NO_CLUSTER" in l]), 1,
+               "the job derives the file list from this module")
+    expect.num(len([l for l in pins if "requirements-test.txt" in l]), 1,
+               "and the pins from requirements-test.txt")
 
     # AND IT MUST NOT ALSO HARDCODE THEM. Deriving plus a stale literal copy is
     # worse than either alone, because the copy looks authoritative.
-    job = text[text.index("pytest-guards:"):]
-    job = job[:job.index("\n  build:")] if "\n  build:" in job else job
     hardcoded = [n for n in NO_CLUSTER if n in job]
     expect.text(", ".join(hardcoded) or "none", "none",
                 "the job names no corpus file literally")
@@ -957,8 +1018,7 @@ def test_the_cluster_job_runs_the_other_half_and_derives_it(expect):
 
     expect.at_least(text.count("pytest-cluster:"), 1,
                     "a job runs the half that needs a cluster")
-    job = text[text.index("pytest-cluster:"):]
-    job = job[:job.index("\n  build:")] if "\n  build:" in job else job
+    job = _ci_job(text, "pytest-cluster")
 
     expect.at_least(job.count("NO_CLUSTER"), 1,
                     "and it derives its file list from this module rather than listing it")
@@ -1103,9 +1163,7 @@ def test_the_job_installs_no_database_driver(expect):
     nothing about the coupling this file exists to keep removed.
     """
     ci = (HERE.parent.parent / ".github" / "workflows" / "ci.yml")
-    job = ci.read_text()
-    job = job[job.index("pytest-guards:"):]
-    job = job[:job.index("\n  build:")] if "\n  build:" in job else job
+    job = _ci_job(ci.read_text(), "pytest-guards")
     # WHAT THIS USED TO ASK, AND WHY IT COULD NOT FAIL. The first assertion was
     #
     #     installs_driver = "psycopg" in job and "pip install" in job \
@@ -1120,16 +1178,24 @@ def test_the_job_installs_no_database_driver(expect):
     # The form below can fail: it looks at the install LINES and asks whether any of
     # them names the driver, and the premise after it is the control -- it appends such
     # a line to a copy and requires the same expression to see it.
-    driver_installs = [l for l in job.splitlines()
-                       if "pip install" in l and DRIVER in l]
-    expect.num(len(driver_installs), 0,
-               "no pip install line in the job names the database driver")
-    planted = job + "\n          pip install --quiet $PINS " + DRIVER + "[binary]==3.3.5\n"
-    expect.at_least(len([l for l in planted.splitlines()
-                         if "pip install" in l and DRIVER in l]), 1,
-                    "premise: and that test sees such a line when one is there")
-    expect.at_least(job.count("pip show " + DRIVER), 1,
-                    "and the job asserts the driver is absent rather than assuming it")
+    #
+    # `-r` COUNTS AS NAMING IT (#1339): requirements-test.txt pins the driver, so
+    # `pip install -r` installs it without the line saying so.
+    def installs(text):
+        return [l for l in _code_lines(text)
+                if "pip install" in l and (DRIVER in l or re.search(r"\s-r\s", l))]
+    expect.num(len(installs(job)), 0,
+               "no pip install line in the job installs the database driver")
+    for line in ("pip install --quiet $PINS " + DRIVER + "[binary]==3.3.5",
+                 "pip install --quiet -r test/pytest/requirements-test.txt"):
+        expect.num(len(installs(job + "\n          " + line + "\n")), 1,
+                   f"premise: and that test sees `{line.split()[3]}` when it is there")
+    # NEGATED, in this job. `pip show psycopg` without the `!` asserts PRESENCE, which
+    # is what the cluster job's line does, and a count could not tell them apart.
+    absent = [l for l in _code_lines(job)
+              if re.match(r"\s*!\s+\S*pip show " + DRIVER + r"\b", l)]
+    expect.num(len(absent), 1,
+               "and the job asserts the driver is absent rather than assuming it")
 
 
 if __name__ == "__main__":

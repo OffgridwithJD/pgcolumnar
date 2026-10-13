@@ -1718,6 +1718,8 @@ fixtures are read off `conftest.py` rather than named in the classifier.
 | `test_the_membership_report_names_a_database_free_file_left_undeclared` | the hole itself, on a fixture, with the control beside it |
 | `test_the_membership_report_names_a_declared_file_that_needs_a_cluster` | the other direction: a listed file that starts using a cluster fixture |
 | `test_the_membership_report_names_a_declared_file_that_is_gone` | a rename is still caught, and as its own kind rather than as a cluster need |
+| `test_a_declared_file_that_needs_the_driver_is_named_as_such` | the `needs-the-driver` kind, on a fixture corpus, because no file in the real tree reaches that branch (#1339) |
+| `test_the_partition_mode_prints_both_halves` | `--partition` prints each file in the half it belongs to; before this, nothing ran that mode |
 | `test_the_gate_runs_the_membership_decision_rather_than_only_this_file` | selftest 350 runs the decision, and the command line it uses works |
 | `test_ci_derives_the_file_list_rather_than_repeating_it` | the CI job asks this module for `NO_CLUSTER`, names no file literally, and states no count |
 | `test_the_job_installs_no_database_driver` | the job asserts psycopg is absent rather than assuming it |

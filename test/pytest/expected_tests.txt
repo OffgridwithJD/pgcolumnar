@@ -618,4 +618,7 @@ guard_tests 424
 # cluster_tests 529 -> 530 for #1337's test_temporal.py::test_for_portion_of, the
 # FOR PORTION OF arms moved into their own test, by collection on this branch
 # (main at a30faeb).
-cluster_tests 530
+#
+# cluster_tests 530 -> 532 for #1339's two test_harness_deps.py arms (the needs-the-driver
+# kind and the --partition mode), by collection over the cluster files on this branch.
+cluster_tests 532
