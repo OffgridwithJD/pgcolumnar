@@ -154,7 +154,7 @@ def test_tier_partition_moves_a_partition_exactly_once(pgc_own_db, pgc_cluster, 
                     "58P02", "an existing path is refused, so no file a table reads is overwritten")
     expect.text(_digest(conn, "s"), rb, "and the refusals moved nothing")
     expect.text(_one(conn, "SELECT relkind::text FROM pg_class WHERE oid = 's_apr'::regclass"), "r",
-                "premise: the other partition is still local after the refusals")
+                "the other partition is still local after the refusals")
 
     # The parent's lock, and a rollback of the whole call.
     _build(conn, "k")
@@ -167,7 +167,7 @@ def test_tier_partition_moves_a_partition_exactly_once(pgc_own_db, pgc_cluster, 
                     " WHERE relation = 'k'::regclass AND pid = pg_backend_pid() AND granted")
         locks = cur.fetchone()[0]
         cur.execute("ROLLBACK")
-    expect.num(moved, mar, "premise: inside the transaction the call moved the cold partition")
+    expect.num(moved, mar, "inside the transaction the call moved the cold partition")
     expect.text("AccessExclusiveLock" if "AccessExclusiveLock" in locks else locks, "AccessExclusiveLock",
                 "the call holds ACCESS EXCLUSIVE on the parent until commit, as the docs say")
     expect.text(f"{_digest(conn, 'k')}|{_mar_shape(conn, 'k')}", f"{kb}|r:pgcolumnar:{BOUND}",
@@ -341,7 +341,7 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
         cur.execute("GRANT SELECT ON acl_mar TO tier_reader_py")
         cur.execute("COMMENT ON TABLE acl_mar IS 'March, archived'")
     expect.num(_one(conn, _tier("acl", server_dir / "acl.parquet")), mar,
-               "premise: the cold partition was moved with its grant and comment set")
+               "the cold partition was moved with its grant and comment set")
     expect.text(_one(conn, "SELECT relkind::text || '|' || has_table_privilege('tier_reader_py', 'acl_mar', 'SELECT')"
                            " || '|' || coalesce(obj_description('acl_mar'::regclass, 'pg_class'), '-')"
                            " FROM pg_class WHERE oid = 'acl_mar'::regclass"),
@@ -409,7 +409,7 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
         cur.execute("SHOW lock_timeout")
         lt = cur.fetchone()[0]
         cur.execute("ROLLBACK")
-    expect.num(lt_moved, mar, "premise: the move ran inside the caller's transaction")
+    expect.num(lt_moved, mar, "the move ran inside the caller's transaction")
     expect.text(lt, "13s", "after the move the caller's lock_timeout is the caller's again")
 
     # 5. A retry over the file a failed attempt left.

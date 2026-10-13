@@ -128,7 +128,7 @@ check "a server of another wrapper is refused" \
 check "an existing path is refused, so no file a table reads is overwritten" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_feb', 'tier_pq', '$W/m_jan.parquet');")" "58P02"
 check "and the refusals moved nothing" "$(digest m)" "$rb"
-check "premise: the other partition is still local after the refusals" \
+check "the other partition is still local after the refusals" \
 	"$(q "SELECT relkind FROM pg_class WHERE oid = 'm_feb'::regclass;")" "r"
 
 # ---- the parent's lock ------------------------------------------------------
@@ -140,7 +140,7 @@ lock="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgre
 	    WHERE relation = 'k'::regclass AND pid = pg_backend_pid() AND granted" \
 	-c "ROLLBACK" 2>&1)"
 # Line 2 is the call's result: a rollback of a call that never ran proves nothing.
-check "premise: inside the transaction the call moved the cold partition" "$(sed -n 2p <<<"$lock")" "8928"
+check "inside the transaction the call moved the cold partition" "$(sed -n 2p <<<"$lock")" "8928"
 check "the call holds ACCESS EXCLUSIVE on the parent until commit, as the docs say" \
 	"$(grep -o 'AccessExclusiveLock' <<<"$lock")" "AccessExclusiveLock"
 check "a rollback after the whole call leaves the rows local, exactly once" \
@@ -251,7 +251,7 @@ check_num "with the dependents gone, the same partition moves" \
 build a
 psql_run "CREATE ROLE tier_reader; GRANT SELECT ON a_jan TO tier_reader;
           COMMENT ON TABLE a_jan IS 'January, cold';"
-check_num "premise: the cold partition was moved with its grant and comment set" \
+check_num "the cold partition was moved with its grant and comment set" \
 	"$(q "SELECT pgcolumnar.tier_partition('a_jan', 'tier_pq', '$W/a.parquet');")" "8928"
 check "the foreign partition keeps the partition's grants and comment" \
 	"$(q "SELECT relkind::text || '|' || has_table_privilege('tier_reader', 'a_jan', 'SELECT') || '|' ||
@@ -304,7 +304,7 @@ lt="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres 
 	-c "BEGIN" -c "SET LOCAL lock_timeout = '7s'" \
 	-c "SELECT 'moved=' || pgcolumnar.tier_partition('t_jan', 'tier_pq', '$W/t.parquet', lock_wait => '3 seconds')" \
 	-c "SHOW lock_timeout" -c "ROLLBACK" 2>&1)"
-check "premise: the move ran inside the caller's transaction" "$(sed -n 's/^moved=//p' <<<"$lt")" "8928"
+check "the move ran inside the caller's transaction" "$(sed -n 's/^moved=//p' <<<"$lt")" "8928"
 check "after the move the caller's lock_timeout is the caller's again" "$(sed -n '/^moved=/{n;p}' <<<"$lt")" "7s"
 
 # ---- a retry after a failure, over the file the failure left ------------------
