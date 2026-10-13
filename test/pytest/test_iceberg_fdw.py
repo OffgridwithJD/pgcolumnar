@@ -363,8 +363,10 @@ BUCKET_PRUNE = [
     (5, "id = 5 bucket-prunes past metrics (Files Pruned: 4)"),
 ]
 
+# id = 1 compares the value too, as the shell twin does (#1339): an id alone passes a
+# read that keeps the right row and returns the wrong data in it.
 BUCKET_ROWS = [
-    (1, "1", "id = 1 returns row 1"),
+    (1, "1|v1", "id = 1 returns row 1"),
     (4, "4", "id = 4 returns row 4"),
     (5, "5", "id = 5 returns row 5"),
 ]
@@ -383,7 +385,9 @@ def test_a_bucket_pruned_equality_returns_its_row(ice, expect, probe, ids, name)
     conn, meta = ice
     if not _need(expect, meta, "evb"):
         return
-    expect.text(_ids(conn, "evb", f"id = {probe}"), ids, name)
+    got = (_one(conn, f"SELECT string_agg(id::text || '|' || val, ',' ORDER BY id) FROM evb WHERE id = {probe}")
+           if "|" in ids else _ids(conn, "evb", f"id = {probe}"))
+    expect.text(got, ids, name)
 
 
 def test_the_bucket_table_reads_whole_and_matches_the_murmur3_oracle(ice, expect):
