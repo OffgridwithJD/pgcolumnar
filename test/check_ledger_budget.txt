@@ -1493,4 +1493,23 @@ suites_not_covered 247
 #     never         1734 +  5 = 1739
 #     dated          411 +  6 =  417
 #     1739 + 417 == 2156
-checks_never_observed_red 1739
+#
+# #1304 option 5, the per-column extent (OffgridwithJD): 1739 -> 1745.
+# column_extent enters the ledger with 33 checks from a five-major run
+# (column_extent.sh 33/33 on each of 15-19). Twenty-seven are dated by eighteen
+# mutations of the extent code, its SQL and the planner's read, each merged one
+# log at a time with --mutation and --target; no premise is among them. A
+# nineteenth mutation survived and is equivalent: the existence check reading
+# the catalog snapshot instead of its own, after the CommandCounterIncrement
+# that refreshes both. Six arrive `never`: two premises (the function exists,
+# the fixture's row groups) and four arms held by construction -- expire and
+# compact_rewrite still retire and rewrite with the extent in place,
+# parallel_copy's loaders all commit (no row is ever updated in place, so there
+# is no update to conflict), and with no extent the planner's zone-map read is
+# still one scan (main's code, guarded by native_groupagg too).
+#
+#     ledger rows   2156 + 33 = 2189
+#     never         1739 +  6 = 1745
+#     dated          417 + 27 =  444
+#     1745 + 444 == 2189
+checks_never_observed_red 1745
