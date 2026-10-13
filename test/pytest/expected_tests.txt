@@ -591,4 +591,7 @@ guard_tests 419
 #
 # cluster_tests 523 -> 524 for option 5's test_a_transaction_reads_its_own_flushed_groups,
 # by collection on the same tree.
-cluster_tests 524
+#
+# cluster_tests 524 -> 525 for #1310's test_a_no_op_expire_reads_the_extent_not_every_zone_map,
+# by collection on this branch (stacked on #1304 option 5).
+cluster_tests 525

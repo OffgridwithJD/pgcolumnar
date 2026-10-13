@@ -508,7 +508,7 @@ psql_run "BEGIN; SELECT pgcolumnar.expire('ttl_rec'); ROLLBACK;"
 check "a rolled-back expire records nothing" "$(_rec)|$(_rgs)" "|1,2,3,4"
 
 _n="$(q "SELECT pgcolumnar.expire('ttl_rec');")"
-check_num "premise: expire retired the three aged groups" "${_n:-0}" "3"
+check_num "expire retired the three aged groups" "${_n:-0}" "3"
 check "expire records exactly the groups it retired" "$(_rec)" "1,2,3"
 check "and they are the groups gone from the row-group catalog" "$(_rgs)" "4"
 
@@ -524,5 +524,61 @@ check "a compaction's retired groups are not recorded as retention" "$(_rec)" "1
 psql_run "DROP TABLE ttl_rec;"
 check_num "dropping the table drops its retention record" \
 	"$(q "SELECT count(*) FROM pgcolumnar.retired_group WHERE storage_id = $_sid;")" "0"
+
+# ---- a no-op expire reads the extent, not every zone map (#1310) -------------
+# Most of the daemon's passes retire nothing. When the retention column's extent
+# (#1304 option 5) puts its minimum past the cutoff, no group can qualify, and
+# expire answers 0 from one index lookup instead of one zone-map probe per group.
+# Fifty groups, so a per-group read shows as fifty scans. The instrument is the
+# one native_groupagg uses: the transaction's own scans of zone_map and its index,
+# in a fresh connection, because the counters carry a backend's earlier reads.
+psql_run "CREATE TABLE ttl_x (ts timestamptz, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('ttl_x', ttl_column => 'ts', ttl_interval => '3650 days');
+	INSERT INTO ttl_x SELECT now() - interval '1 day' + g * interval '1 second', g FROM generate_series(1, 50000) g;"
+_xsid="$(q "SELECT pgcolumnar.get_storage_id('ttl_x');")"
+check_num "premise: the no-op fixture has many row groups" \
+	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = $_xsid;")" "50"
+_expire_scans() {	# _expire_scans TABLE [SQL run first in the transaction] -> "n=<retired> scans=<zone-map scans>"
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At -q \
+		-c "BEGIN" ${2:+-c "$2"} \
+		-c "SELECT 'n=' || pgcolumnar.expire('$1') || ' scans=' ||
+		           (pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass)
+		            + pg_stat_get_xact_numscans('pgcolumnar.zone_map_pkey'::regclass))" \
+		-c "ROLLBACK" 2>&1
+}
+check "a no-op expire reads no zone map when the extent's minimum is past the cutoff" \
+	"$(_expire_scans ttl_x)" "n=0 scans=0"
+check "without the extent the same expire probes every group's zone map" \
+	"$(_expire_scans ttl_x "DELETE FROM pgcolumnar.column_extent WHERE storage_id = $_xsid")" "n=0 scans=50"
+
+# The extent may say a group can qualify, and then expire decides group by group as
+# before: the same groups with or without it.
+psql_run "CREATE TABLE ttl_y (ts timestamptz, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('ttl_y', ttl_column => 'ts', ttl_interval => '2 days');
+	INSERT INTO ttl_y SELECT now() - interval '9 days' + g * interval '1 second', g FROM generate_series(1, 3000) g;
+	INSERT INTO ttl_y SELECT now() + g * interval '1 second', g FROM generate_series(1, 2000) g;"
+_ysid="$(q "SELECT pgcolumnar.get_storage_id('ttl_y');")"
+_y_without="$(_expire_scans ttl_y "DELETE FROM pgcolumnar.column_extent WHERE storage_id = $_ysid" | sed 's/ scans=.*//')"
+check "premise: without the extent, expire retires the aged groups" "$_y_without" "n=3"
+check "with the extent, expire retires the same groups" "$(_expire_scans ttl_y | sed 's/ scans=.*//')" "$_y_without"
+
+# Old rows written earlier in expire's own transaction: their groups are visible to
+# it before its extent row is written, so the early exit must count them.
+psql_run "CREATE TABLE ttl_z (ts timestamptz, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('ttl_z', ttl_column => 'ts', ttl_interval => '2 days');
+	INSERT INTO ttl_z SELECT now() + g * interval '1 second', g FROM generate_series(1, 2000) g;"
+check "expire in the transaction that wrote aged rows retires their groups" \
+	"$(_expire_scans ttl_z "INSERT INTO ttl_z SELECT now() - interval '9 days' + g * interval '1 second', g FROM generate_series(1, 3000) g" | sed 's/ scans=.*//')" "n=3"
+
+# A column left with no value at all: expire retires every group that held one,
+# and the recompute it commits leaves a complete extent with no minimum. The NULL
+# rows' groups are kept, and the next pass has nothing to read.
+psql_run "CREATE TABLE ttl_n (ts timestamptz, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('ttl_n', ttl_column => 'ts', ttl_interval => '2 days');
+	INSERT INTO ttl_n SELECT now() - interval '9 days' + g * interval '1 second', g FROM generate_series(1, 2000) g;
+	INSERT INTO ttl_n SELECT NULL, g FROM generate_series(1, 4000) g;"
+check_num "premise: expire retires the aged groups and keeps those of NULLs" \
+	"$(q "SELECT pgcolumnar.expire('ttl_n');")" "2"
+check "a later expire on a column of only NULLs reads no zone map" "$(_expire_scans ttl_n)" "n=0 scans=0"
 
 pgc_summary

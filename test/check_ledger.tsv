@@ -2165,6 +2165,73 @@ timeseries_recipes	timeseries_recipes	the how-to gives the LOCF recipe	15;16;17;
 timeseries_recipes	timeseries_recipes	the how-to gives the gap-fill recipe	15;16;17;18;19	2026-10-13	the how-to's 'Fill empty buckets' heading renamed, so the recipe is no longer found
 timeseries_recipes	timeseries_recipes	the how-to gives the interpolation recipe	15;16;17;18;19	2026-10-13	the how-to's 'Interpolate between known values' heading renamed, so the recipe is no longer found
 timeseries_recipes	timeseries_recipes	the interpolation recipe fills a gap linearly, and leaves both ends NULL	15;16;17;18;19	2026-10-13	the how-to's 'Interpolate between known values' heading renamed, so the recipe is no longer found;the how-to's interpolation recipe uses prev_v in place of next_v, so every gap is filled flat;the how-to's recipes join the series to the aggregate with JOIN instead of LEFT JOIN
+ttl_expire	ttl_expire	NO row still inside the retention was dropped (#403 item 5a)	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	NO row still inside the retention was dropped, on a date column	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a compaction's retired groups are not recorded as retention	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	a date retention column is accepted, not refused (#1135)	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a group whose only NULLs have been deleted is retired	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a later expire on a column of only NULLs reads no zone map	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310);the early exit not taken for a column with no value
+ttl_expire	ttl_expire	a negative ttl_interval is refused with 22023	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a no-op expire reads no zone map when the extent's minimum is past the cutoff	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310)
+ttl_expire	ttl_expire	a rolled-back expire records nothing	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a row dated exactly on the cutoff is kept, so truncation errs toward keeping	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a table with no declared retention is an error, not a silent success	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	and a zero ttl_interval is refused too	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	and its rows are gone	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	and no row older than Pacific/Midway's own cutoff survives	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	and no row older than UTC's own cutoff survives	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	and the date table really is smaller than it was	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	and the expired timestamps sharing the group were kept with them	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	and the table lost exactly the groups it retired	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	and the table really is smaller than it was	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	and they are the groups gone from the row-group catalog	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	and those NULL rows are still there	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	control: a group whose NULLs are still live is NOT retired	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	control: and a positive one is still accepted	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	control: and the rows are all still there	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	control: and those NULL rows survive	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	dropping the table drops its retention record	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	every remaining date row reads back its own value	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	every remaining row reads back its own value	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	expire does not retire a group that still holds NULL retention rows	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	expire in Pacific/Midway keeps exactly the rows at or after that session's cutoff	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire in UTC keeps exactly the rows at or after that session's cutoff	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire in the transaction that wrote aged rows retires their groups	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum;the extent bound leaves out the transaction's own pending fold (#1304 option 5's fix)
+ttl_expire	ttl_expire	expire on a date column retires at least one group	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire records exactly the groups it retired	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire retired the three aged groups	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire retires at least one group (#403 item 5a)	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire retires the all-visible expired group	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	index-only scan does not return rows expire already retired	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: an index-only scan is chosen on the all-visible table	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: and VACUUM really did set visibility-map bits to clear	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: and every live row is past the retention	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: and rows dated exactly ON the cutoff, which decide the rounding	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: and the SAME row group holds expired rows and NULL ones	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: but the zone map still records the deleted NULLs	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: compact_rewrite retired a group	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: expire retires the aged groups and keeps those of NULLs	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: in Pacific/Midway the fixture straddles that session's cutoff	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: in UTC the fixture straddles that session's cutoff	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: no LIVE row holds a NULL retention value any more	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: one date per row group in Pacific/Midway, so no group straddles the cutoff	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: one date per row group in UTC, so no group straddles the cutoff	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: rows exist on both sides of the cutoff within one day of it	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: some rows are past the retention and some are not	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the date fixture has rows on both sides of the cutoff	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the date fixture is laid out in several row groups	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the fixture is ONE row group, so the NULLs share it	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the fixture is laid out in several row groups	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the no-op fixture has many row groups	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the record fixture has three aged-out row groups ahead of the current ones	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the table holds NULL retention rows at all	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: without the extent, expire retires the aged groups	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	running it again retires nothing, because nothing new expired	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	seqscan agrees the expired rows are gone	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	the index-only scan is still the plan after expire	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	the retention is recorded where the other options live	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	with the extent, expire retires the same groups	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	without the extent the same expire probes every group's zone map	15;16;17;18;19	never	-
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
 validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
 validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-

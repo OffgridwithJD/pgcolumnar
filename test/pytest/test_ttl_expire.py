@@ -649,7 +649,7 @@ def test_expire_records_what_it_retires_and_nothing_else(pgc_conn, expect):
     expect.text(f"{rec(sid)}|{rgs(sid)}", "|1,2,3,4,5", "a rolled-back expire records nothing")
 
     n = _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_rr')")
-    expect.num(n, 3, "premise: expire retired the three aged groups")
+    expect.num(n, 3, "expire retired the three aged groups")
     expect.text(rec(sid), "1,2,3", "expire records exactly the groups it retired")
     expect.text(rgs(sid), "4,5", "and they are the groups gone from the row-group catalog")
 
@@ -663,3 +663,71 @@ def test_expire_records_what_it_retires_and_nothing_else(pgc_conn, expect):
     pgc_conn.execute("DROP TABLE ttl_rr")
     expect.num(_one(pgc_conn, "SELECT count(*) FROM pgcolumnar.retired_group WHERE storage_id = %s",
                     (sid,)), 0, "dropping the table drops its retention record")
+
+
+def test_a_no_op_expire_reads_the_extent_not_every_zone_map(pgc_conn, pgc_cluster, expect):
+    """Most of the daemon's passes retire nothing (#1310). When the retention
+    column's extent (#1304 option 5) puts its minimum past the cutoff, no group can
+    qualify, and expire answers 0 without a zone-map probe per group.
+
+    Counted as native_groupagg counts: the transaction's own scans of zone_map and
+    its index, in a fresh connection, because the counters carry a backend's earlier
+    reads for about a second.
+    """
+    dsn = pgc_cluster.dsn(dbname=_one(pgc_conn, "SELECT current_database()"))
+    path = _one(pgc_conn, "SHOW search_path")
+
+    def run(table, first=None):
+        """'n=<retired> scans=<zone-map scans>', in one transaction rolled back."""
+        with psycopg.connect(dsn) as c:
+            with c.cursor() as cur:
+                cur.execute(f"SET search_path TO {path}")
+                if first:
+                    cur.execute(first)
+                cur.execute(f"SELECT pgcolumnar.expire('{table}'),"
+                            " pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass)"
+                            " + pg_stat_get_xact_numscans('pgcolumnar.zone_map_pkey'::regclass)")
+                n, scans = cur.fetchone()
+            c.rollback()
+        return f"n={n} scans={scans}"
+
+    def table(name, interval, *inserts):
+        with pgc_conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {name} (ts timestamptz, v int) USING pgcolumnar")
+            cur.execute(f"SELECT pgcolumnar.set_options('{name}', stripe_row_limit => {GROUP},"
+                        f" ttl_column => 'ts', ttl_interval => '{interval}')")
+            for sql in inserts:
+                cur.execute(sql)
+        return _one(pgc_conn, f"SELECT pgcolumnar.get_storage_id('{name}')")
+
+    sid = table("ttl_nx", "4000 days",
+                f"INSERT INTO ttl_nx SELECT now() - interval '20 hours' + g * interval '1 s', g"
+                f" FROM generate_series(1, {40 * GROUP}) g")
+    expect.num(_one(pgc_conn, "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = %s", (sid,)), 40,
+               "premise: the no-op fixture has many row groups")
+    expect.text(run("ttl_nx"), "n=0 scans=0",
+                "a no-op expire reads no zone map when the extent's minimum is past the cutoff")
+    expect.text(run("ttl_nx", f"DELETE FROM pgcolumnar.column_extent WHERE storage_id = {sid}"), "n=0 scans=40",
+                "without the extent the same expire probes every group's zone map")
+
+    sid = table("ttl_ny", "3 days",
+                f"INSERT INTO ttl_ny SELECT now() - interval '12 days' + g * interval '1 s', g"
+                f" FROM generate_series(1, {4 * GROUP}) g",
+                f"INSERT INTO ttl_ny SELECT now() + g * interval '1 s', g FROM generate_series(1, {GROUP}) g")
+    without = run("ttl_ny", f"DELETE FROM pgcolumnar.column_extent WHERE storage_id = {sid}").split(" ")[0]
+    expect.text(without, "n=4", "premise: without the extent, expire retires the aged groups")
+    expect.text(run("ttl_ny").split(" ")[0], without, "with the extent, expire retires the same groups")
+
+    table("ttl_nz", "3 days",
+          f"INSERT INTO ttl_nz SELECT now() + g * interval '1 s', g FROM generate_series(1, {GROUP}) g")
+    expect.text(run("ttl_nz", f"INSERT INTO ttl_nz SELECT now() - interval '12 days' + g * interval '1 s', g"
+                              f" FROM generate_series(1, {4 * GROUP}) g").split(" ")[0], "n=4",
+                "expire in the transaction that wrote aged rows retires their groups")
+
+    table("ttl_nn", "3 days",
+          f"INSERT INTO ttl_nn SELECT now() - interval '12 days' + g * interval '1 s', g"
+          f" FROM generate_series(1, {3 * GROUP}) g",
+          f"INSERT INTO ttl_nn SELECT NULL, g FROM generate_series(1, {2 * GROUP}) g")
+    expect.num(_one(pgc_conn, "SELECT pgcolumnar.expire('ttl_nn')"), 3,
+               "premise: expire retires the aged groups and keeps those of NULLs")
+    expect.text(run("ttl_nn"), "n=0 scans=0", "a later expire on a column of only NULLs reads no zone map")

@@ -2491,6 +2491,36 @@ pgcolumnar_expire(PG_FUNCTION_ARGS)
 	}
 
 	storageId = PgColumnarStorageId(rel);
+
+	/*
+	 * THE NO-OP PASS ENDS HERE (#1310). Most of the daemon's passes retire
+	 * nothing, and the loop below proves that with one zone-map probe per group.
+	 * The column's extent (#1304 option 5) bounds every value a group visible to
+	 * this snapshot can hold, this transaction's own flushed groups included, so
+	 * when its minimum is not below the cutoff no group's maximum is either, and
+	 * nothing can qualify. A column with no value at all has nothing to retire
+	 * either: its groups have no minimum and maximum, which the loop keeps.
+	 *
+	 * An extent can be wider than the data, never narrower, and a wider one only
+	 * means no early exit. With no complete extent the loop decides as before.
+	 */
+	{
+		/* read only when the column has a value; initialised for gcc's LTO pass */
+		Datum		emin = (Datum) 0,
+					emax = (Datum) 0;
+		bool		hasValues = false;
+
+		if (PgColumnarExtentBound(rel, attno - 1, GetActiveSnapshot(),
+								  &emin, &emax, &hasValues) &&
+			(!hasValues ||
+			 DatumGetInt32(FunctionCall2Coll(&tce->cmp_proc_finfo, att->attcollation,
+											 emin, cutoff)) >= 0))
+		{
+			table_close(rel, NoLock);
+			PG_RETURN_INT64(0);
+		}
+	}
+
 	groups = PgColumnarReadRowGroupList(storageId, GetActiveSnapshot());
 
 	/*

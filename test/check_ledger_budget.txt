@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 247
+suites_not_covered 246
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -1540,4 +1540,23 @@ suites_not_covered 247
 #     never         1746 - 1     = 1745
 #     dated          446 + 1     =  447
 #     1745 + 447 == 2192
-checks_never_observed_red 1745
+#
+# #1310, a no-op expire answers from the extent (OffgridwithJD): 1745 -> 1796,
+# and suites_not_covered 247 -> 246. ttl_expire enters the ledger with all 67
+# checks from a five-major run (ttl_expire.sh 67/67 on each of 15-19), at
+# jdatcmd's request on #1304: it is the suite for the one function that deletes
+# rows. Sixteen are dated by four mutations, each merged one log at a time with
+# --mutation and --target: the early exit removed (the tree before #1310), the
+# extent's maximum compared instead of its minimum (fourteen checks, among them
+# twelve of the suite's existing arms), the exit not taken for a column with no
+# value, and the extent bound without option 5's own-transaction fold. No
+# premise is among them: 'expire retired the three aged groups' was a premise
+# that the second mutation reddened, and was renamed to an arm first (#1236).
+# The other fifty-one arrive never -- the suite's older arms, which no mutation
+# of this change reaches, and its premises.
+#
+#     ledger rows   2192 + 67 = 2259
+#     never         1745 + 51 = 1796
+#     dated          447 + 16 =  463
+#     1796 + 463 == 2259
+checks_never_observed_red 1796
