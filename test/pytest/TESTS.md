@@ -6233,7 +6233,8 @@ restored byte-identical.
 | `test_a_non_positive_retention_is_refused` | a cutoff in the future would retire live groups: `22023`, with a positive control |
 | `test_a_deleted_null_stops_pinning_its_group` | `null_count` is a write-time record, not a live count |
 | `test_a_date_retention_column_truncates_toward_keeping` | the rounding, which only this arm notices |
-| `test_the_cutoff_is_the_sessions_own_date` | the cutoff is the session's, asserted as an identity rather than as a difference |
+| `test_the_cutoff_is_the_sessions_own_date` | the cutoff is the session's, asserted as an identity rather than as a difference, in UTC and in a zone chosen at run time to be on another date (#1339) |
+| `test_a_timestamp_retention_column_uses_the_sessions_local_time` | a `timestamp` column's cutoff is the session's local now: in UTC+14, exactly the groups wholly before it are retired (#1339) |
 | `test_expire_records_what_it_retires_and_nothing_else` | `expire` writes exactly the groups it retires to `pgcolumnar.retired_group` (#1294); a rolled-back `expire` and a `compact_rewrite` record nothing; dropping the table drops its rows |
 | `test_a_no_op_expire_reads_the_extent_not_every_zone_map` | #1310: with the retention column's extent (#1304 option 5) past the cutoff, a no-op `expire` makes 0 zone-map scans where it made one per group; the same groups retire with or without the extent; aged rows written in `expire`'s own transaction retire; a column left with only NULLs needs no reads. Counted in a fresh connection, with the test schema's `search_path` carried over. Seen red first: 40 scans |
 
