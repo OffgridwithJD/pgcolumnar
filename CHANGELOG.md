@@ -29,6 +29,16 @@ true until the next version shipped.
   draft built its heap mirror by copying the columnar table, so a scan that lost
   rows lost them on both sides and every equality stayed green under a mutation
   dropping one row in a thousand; the mirror is now written from the generator.
+- `pgcolumnar.expire` records each row group it retires in a new catalog,
+  `pgcolumnar.retired_group (storage_id, group_number, retired_at)`, in its own
+  transaction (#1294). An incremental rollup keeps its buckets when retention drops
+  their raw rows, by the owner's decision on #1294, so its refresh must tell a group
+  retired by retention from one a delete or a rewrite removed; this record is how.
+  Nothing else writes there: a compaction's retired groups are a change to the data.
+  The rows go with the table's other metadata. Added to the alpha5 install script
+  and the alpha4 to alpha5 upgrade; `native_upgrade_converge` 21/21. ttl_expire and
+  its pytest twin hold it: exactly the retired groups are recorded, a rolled-back
+  expire and a `compact_rewrite` record nothing, and a drop clears the rows.
 
 - `test/format_downgrade.sh` and `test_format_downgrade.py` test #1137's promise
   with both real libraries. They build `v1.0-alpha4`, write with it, upgrade to the

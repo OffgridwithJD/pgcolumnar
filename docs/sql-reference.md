@@ -211,6 +211,10 @@ Drops row groups whose rows are all older than the retention declared by
 **This deletes rows.** It runs only when you call it. No other operation applies
 a retention, and `VACUUM` never does.
 
+Each group it drops is recorded in `pgcolumnar.retired_group`, in the same
+transaction. An incremental rollup reads that record to keep the summary of rows
+that retention dropped (#1294). No other operation writes there.
+
 It reads no data. A row group records the maximum value of each of its columns.
 A group whose maximum is older than the cutoff holds no row still inside the
 retention. Its metadata is dropped without decoding anything.

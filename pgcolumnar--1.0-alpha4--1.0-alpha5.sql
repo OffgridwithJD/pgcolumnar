@@ -963,3 +963,22 @@ BEGIN
 	RETURN made;
 END;
 $create_ahead$;
+/* ---------------------------------------------------------------------------
+ * pgcolumnar.retired_group (#1294)
+ *
+ * The row groups pgcolumnar.expire retired for retention, one row each, written
+ * in expire's own transaction. An incremental rollup keeps its buckets when
+ * retention drops their raw rows (the owner's decision on #1294), so its
+ * refresh must tell a group retired by retention from one deleted or
+ * rewritten; this is where it looks. Nothing but expire writes here: a
+ * compaction's retired groups are a change to the data, not retention.
+ * Deleted with the storage's other metadata.
+ * ------------------------------------------------------------------------- */
+
+CREATE TABLE pgcolumnar.retired_group (
+	storage_id bigint NOT NULL,
+	group_number bigint NOT NULL,
+	retired_at timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX retired_group_pkey
+	ON pgcolumnar.retired_group USING btree (storage_id, group_number);
