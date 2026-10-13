@@ -155,8 +155,16 @@ def test_every_access_method_the_page_claims_builds_and_answers(pgc_conn, expect
 
             c.execute("DROP INDEX IF EXISTS ias_probe")
             c.execute(f"CREATE INDEX ias_probe ON ias USING {am} ({col})")
+            # MEASURED, NOT A LITERAL COMPARED WITH ITSELF (#1339): the index exists,
+            # is valid, and belongs to the access method under test.
+            c.execute(
+                "SELECT a.amname || ':' || i.indisvalid FROM pg_index i"
+                " JOIN pg_class x ON x.oid = i.indexrelid JOIN pg_am a ON a.oid = x.relam"
+                " WHERE x.relname = 'ias_probe'"
+            )
+            row = c.fetchone()
             expect.text(
-                "built", "built",
+                row[0] if row else "no index", f"{am}:true",
                 f"{am} builds an index over a columnar table",
             )
 
