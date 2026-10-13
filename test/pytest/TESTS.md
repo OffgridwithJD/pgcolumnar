@@ -1387,6 +1387,10 @@ than a single test, which is why they were built before the rest of the backlog.
 | `test_layer_rejects_a_parametrize_over_an_empty_list` | an empty parameter set fails the run | `1 skipped`, exit 0 |
 | `test_layer_accepts_a_parametrize_with_cases` | **positive control** | a real parameter set is untouched |
 | `test_layer_rejects_a_fixture_that_skips` | a skip arriving during setup fails the run | every dependent test skips, exit 0 |
+| `test_layer_rejects_a_skip_in_the_test_body` | `pytest.skip()` in the body fails the run (#1339) | the test reads as skipped, exit 0 |
+| `test_layer_rejects_an_xfail_in_the_test_body` | `pytest.xfail()` in the body fails the run | "xfailed", which pytest counts as success |
+| `test_layer_rejects_an_importorskip_in_the_test_body` | `pytest.importorskip()` in the body fails the run | a skip that bypasses `expect.cannot_run`'s closed list of reasons |
+| `test_layer_rejects_an_xfail_marker` | an `xfail` marker is refused at collection, as `skip` is | `xfail_strict` catches an XPASS, but a failing test under xfail is still exit 0 |
 | `test_layer_allows_a_declared_unrunnable_test` | **escape hatch and control** | `expect.cannot_run` records a counted assertion instead of skipping |
 | `test_layer_allows_a_deliberately_selected_subset` | `-k` is a deliberate act, not tests lost | the guard reported 15 deselected tests as never reported and failed a healthy run |
 | `test_layer_allows_an_explicitly_deselected_test` | `--deselect` reaches the same hook by another route | pinned separately so one fix cannot cover only one spelling |

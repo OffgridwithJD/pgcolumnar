@@ -1675,6 +1675,7 @@ class _RunShape:
         self.collected = set()
         self.reported = set()
         self.setup_skips = []
+        self.call_skips = []
 
     def pytest_collection_modifyitems(self, items):
         # Fires in the controller when running serially, and in each worker under
@@ -1733,6 +1734,11 @@ class _RunShape:
             self.reported.add(report.nodeid)
         if report.when == "setup" and report.skipped:
             self.setup_skips.append(report.nodeid)
+        # AND DURING THE CALL (#1339). pytest.skip(), pytest.xfail() and
+        # pytest.importorskip() in a test body raise past pytest_runtest_call's guards,
+        # and an xfail marker reports a failing test as skipped here. Each is exit 0.
+        if report.when == "call" and report.skipped:
+            self.call_skips.append(report.nodeid)
 
     def pytest_sessionfinish(self, session, exitstatus):
         # Only the process holding the whole picture can reconcile: an xdist worker
@@ -1765,6 +1771,14 @@ class _RunShape:
                 f"how one fixture removes every test that depends on it: "
                 + ", ".join(sorted(self.setup_skips)[:5])
                 + (" ..." if len(self.setup_skips) > 5 else "")
+                + " -- use expect.cannot_run(REASON, detail) in the test instead"
+            )
+        if self.call_skips:
+            problems.append(
+                f"{len(self.call_skips)} test(s) were skipped or xfailed while running, "
+                f"which pytest counts as success: "
+                + ", ".join(sorted(self.call_skips)[:5])
+                + (" ..." if len(self.call_skips) > 5 else "")
                 + " -- use expect.cannot_run(REASON, detail) in the test instead"
             )
         if problems:
@@ -2575,7 +2589,9 @@ def pytest_collection_modifyitems(session, config, items,
     offenders = []
     seen_files = set()
     for item in items:
-        for marker in ("skip", "skipif"):
+        # xfail too (#1339): xfail_strict turns an XPASS into a failure, but a FAILING
+        # test under xfail is still "xfailed", and pytest counts that as success.
+        for marker in ("skip", "skipif", "xfail"):
             mk = item.get_closest_marker(marker)
             if mk is None:
                 continue
