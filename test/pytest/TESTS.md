@@ -6673,6 +6673,8 @@ What the arms found, in order:
 - A foreign key REFERENCING a columnar table is refused by pgcolumnar itself, so it cannot arise. In the first draft of that arm the setup failed, rolled back the previous case's DROP with it (a multi-statement string is one transaction), and the arm passed on a leftover trigger. Each dependent is now made in statements of its own, with a premise that it exists, and a control arm shows the same partition moves once they are gone.
 - The deadlock @jdatcmd predicted is real: an insert through the parent racing the move ends with one side cancelled (`40P01`), and every row is still exactly once.
 
+@jdatcmd's review of #1317 found four inputs that failed after the export, each leaving an orphan file, each an arm now: a schema, owner or grantee whose name needs quoting (`%I` over a reg* cast quoted it twice), a column with its own collation, and a stored generated column (both refused at ATTACH). On PostgreSQL 18 a virtual generated column is carried too; measured, ATTACH accepts a foreign table with either kind, and an identity column on the parent needs nothing.
+
 On a private database, because foreign servers are per database. A local path stands in for object storage. The pytest half uses connections in threads where the shell half uses background sessions.
 
 ### Every test
@@ -6681,3 +6683,4 @@ On a private database, because foreign servers are per database. A local path st
 | --- | --- |
 | `test_tier_partition_moves_a_partition_exactly_once` | the move returns the rows moved; the parent's answers are the same; the cold range is a foreign partition with the same name and bound, reading the exported file; no pgcolumnar catalog rows are left; pruning keeps the ranges apart; an insert into the tiered range is refused; five refusals move nothing; the parent is held ACCESS EXCLUSIVE until commit, and a rollback leaves the rows local; a write in flight is exported; a fault after each of the five steps leaves the rows exactly once, still local |
 | `test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency` | at each isolation level a row committed between the snapshot and the lock survives, and only READ COMMITTED moves; a UNIQUE parent and four kinds of dependent are refused with no file left, and the partition moves once they are gone; grants and comment carry over; a racing insert leaves every row once; lock_wait times a held parent out with nothing attached; the caller's lock_timeout survives; a retry over a failed attempt's file moves the partition |
+| `test_tier_partition_moves_a_virtual_generated_column` | PostgreSQL 18+: a partition whose parent has a virtual generated column moves and reads back the same; below 18, `UNSUPPORTED_MAJOR`, listed in `expected_unrunnable.txt` |
