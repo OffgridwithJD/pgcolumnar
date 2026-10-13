@@ -330,13 +330,17 @@ CREATE INDEX free_space_fit
  * refresh must tell a group retired by retention from one deleted or
  * rewritten; this is where it looks. Nothing but expire writes here: a
  * compaction's retired groups are a change to the data, not retention.
+ * deleted_count is the group's deleted count when expire retired it: rows
+ * deleted after a rollup's last refresh cannot be recomputed once the group is
+ * gone, and this is how the refresh sees that (found on #1328).
  * Deleted with the storage's other metadata.
  * ------------------------------------------------------------------------- */
 
 CREATE TABLE pgcolumnar.retired_group (
 	storage_id bigint NOT NULL,
 	group_number bigint NOT NULL,
-	retired_at timestamptz NOT NULL
+	retired_at timestamptz NOT NULL,
+	deleted_count bigint NOT NULL
 );
 CREATE UNIQUE INDEX retired_group_pkey
 	ON pgcolumnar.retired_group USING btree (storage_id, group_number);
@@ -2205,14 +2209,21 @@ END;
 $create_ahead$;
 
 /* ---------------------------------------------------------------------------
- * Incremental rollups, phase 1: append-only (#1294).
+ * Incremental rollups (#1294).
  *
  * A rollup is a VIEW over a partials table. The partials table holds, per
  * (bucket, group_by...) key, the parts each aggregate combines from: count, sum,
  * min, max, and for avg a sum and a count. The view turns those into the
  * aggregates. refresh_rollup folds the rows of row groups that are new since the
- * last refresh, in ONE statement, so the group list it reads, the rows it folds
- * and the groups it records all come from one snapshot (#1294 point 1).
+ * last refresh, and recomputes the buckets of groups that were deleted from or
+ * rewritten since (phase 2, dirty buckets), in ONE statement: the group list it
+ * reads, the rows it folds and the groups it records all come from one snapshot
+ * (#1294 point 1).
+ *
+ * Each recorded group carries the time range of the rows folded from it,
+ * because a group that is gone has no zone maps left to ask. Retention keeps
+ * history: the ranges of the groups expire retired collect in the rollup's
+ * history, and a refresh that would recompute a bucket in it is refused.
  *
  * pgcolumnar.rollup and pgcolumnar.rollup_group are readable and writable by
  * anyone, row-level security limiting each role to the rollups it owns: the
@@ -2228,7 +2239,11 @@ CREATE TABLE pgcolumnar.rollup (
 	origin timestamptz NOT NULL,
 	group_by name[] NOT NULL,
 	agg_functions text[] NOT NULL,
-	agg_columns name[] NOT NULL
+	agg_columns name[] NOT NULL,
+	-- the time ranges of the groups retention retired: their buckets keep rows
+	-- the source no longer has, so they are never recomputed
+	history tstzmultirange NOT NULL DEFAULT '{}',
+	history_has_null boolean NOT NULL DEFAULT false
 );
 
 CREATE TABLE pgcolumnar.rollup_group (
@@ -2236,6 +2251,10 @@ CREATE TABLE pgcolumnar.rollup_group (
 	group_number bigint NOT NULL,
 	row_count bigint NOT NULL,
 	deleted_count bigint NOT NULL,
+	-- the range of ts_column over the rows folded; NULL when none had a ts
+	ts_min timestamptz,
+	ts_max timestamptz,
+	ts_has_null boolean NOT NULL,
 	PRIMARY KEY (rollup, group_number)
 );
 
@@ -2285,14 +2304,14 @@ $rsg$;
  * no GRANT; the caller must be able to SELECT the source.
  */
 CREATE FUNCTION pgcolumnar.rollup_source_retired(source regclass)
-	RETURNS TABLE (group_number bigint)
+	RETURNS TABLE (group_number bigint, deleted_count bigint)
 	LANGUAGE plpgsql STABLE SECURITY DEFINER
 	SET search_path = pg_catalog, pg_temp
 AS $rsr$
 BEGIN
 	PERFORM pgcolumnar.require_caller_select(source);
 	RETURN QUERY
-		SELECT r.group_number FROM pgcolumnar.retired_group r
+		SELECT r.group_number, r.deleted_count FROM pgcolumnar.retired_group r
 		 WHERE r.storage_id = pgcolumnar.get_storage_id(source);
 END
 $rsr$;
@@ -2452,6 +2471,8 @@ DECLARE
 	c		text;
 	g		name;
 	folded	bigint;
+	refused	boolean;
+	wabs	interval;
 BEGIN
 	-- A REPEATABLE READ caller's snapshot predates the lock below, so a refresh
 	-- that waited for another would fold the same groups again.
@@ -2472,24 +2493,10 @@ BEGIN
 			USING ERRCODE = 'object_not_in_prerequisite_state',
 				  HINT = 'If the rollup is current, pgcolumnar.rebase_rollup records the source''s new row groups.';
 	END IF;
-	-- Retention keeps history (the owner's decision on #1294): a recorded group
-	-- that expire retired leaves the snapshot, and its buckets keep the rows they
-	-- folded. Retirement is permanent, so this need not share the fold's snapshot.
-	DELETE FROM pgcolumnar.rollup_group rg
-	 WHERE rg.rollup = r.rollup
-	   AND rg.group_number IN (SELECT t.group_number FROM pgcolumnar.rollup_source_retired(r.source) t);
-	-- Phase 1 folds appends only: any other recorded group that is gone, or has
-	-- new deletions, needs phase 2's dirty buckets.
-	SELECT string_agg(rg.group_number::text, ', ' ORDER BY rg.group_number) INTO changed
-	  FROM pgcolumnar.rollup_group rg
-	  LEFT JOIN pgcolumnar.rollup_source_groups(r.source) s USING (group_number)
-	 WHERE rg.rollup = r.rollup
-	   AND (s.group_number IS NULL OR s.deleted_count <> rg.deleted_count);
-	IF changed IS NOT NULL THEN
-		RAISE EXCEPTION 'rollup %: row groups % of its source were deleted from or rewritten', rollup, changed
-			USING ERRCODE = 'feature_not_supported',
-				  DETAIL = 'This version folds appended row groups only; changed ones need dirty buckets (phase 2).';
-	END IF;
+	-- The width as plain seconds: a timestamptz plus '1 day' is a calendar day
+	-- in the session's zone, 23 or 25 hours across a DST change, while date_bin
+	-- counts a day as 24 hours.
+	wabs := make_interval(secs => extract(epoch FROM r.width)::float8);
 
 	FOREACH g IN ARRAY r.group_by LOOP
 		keys := keys || format(', %I', g);
@@ -2547,23 +2554,65 @@ BEGIN
 	SELECT string_agg(format('%I', x), ', ' ORDER BY o) INTO rowcols
 	  FROM unnest(rcols) WITH ORDINALITY u(x, o);
 
-	-- ONE statement: the group list, the rows of the new groups (one TID range
-	-- per group, so only their row groups are read), the fold into the partials
-	-- and the record of the groups folded all see the same snapshot. A group
-	-- that commits while this runs is in none of them, and the next refresh
-	-- takes it. pgcolumnar.rollup_pause holds the statement open for that arm.
+	-- ONE statement, so one snapshot, for all of it:
+	--   * the groups. A recorded group that expire retired (keep history, the
+	--     owner's decision on #1294) leaves the record and its range joins the
+	--     rollup's history. Any other recorded group that is gone, or whose
+	--     deleted count moved, is CHANGED.
+	--   * the dirty buckets: every bucket a changed group's recorded range covers,
+	--     and the NULL bucket when it had rows without a ts. Their partials are
+	--     deleted and recomputed from the source's live rows.
+	--   * the rows of the new groups (one TID range per group, so only their row
+	--     groups are read), folded into the clean buckets only: the recompute
+	--     already counts their rows in the dirty ones.
+	--   * the record: changed groups recounted or forgotten, new ones added with
+	--     the range of their rows.
+	-- A group that commits while this runs is in none of it, and the next
+	-- refresh takes it. Reading retirement here, not in an earlier statement,
+	-- keeps a group expire retires meanwhile from looking deleted.
+	-- pgcolumnar.rollup_pause holds the statement open for that arm.
 	EXECUTE format($f$
 		WITH cur AS (
 			SELECT * FROM pgcolumnar.rollup_source_groups(%1$L::regclass)
+		), ret AS (
+			SELECT * FROM pgcolumnar.rollup_source_retired(%1$L::regclass)
 		), held AS (
 			SELECT pg_sleep(CASE WHEN current_setting('pgcolumnar.rollup_pause', true) = 'on'
 								 THEN 2 ELSE 0 END) AS slept
+		), rec AS (
+			SELECT rg.* FROM pgcolumnar.rollup_group rg WHERE rg.rollup = %2$L::regclass
+		), retiring AS (
+			SELECT rg.* FROM rec rg WHERE rg.group_number IN (SELECT t.group_number FROM ret t)
+		), changed AS (
+			SELECT rg.group_number, rg.ts_min, rg.ts_max, rg.ts_has_null,
+				   c.row_count AS now_rows, c.deleted_count AS now_deleted
+			  FROM rec rg LEFT JOIN cur c USING (group_number)
+			 WHERE rg.group_number NOT IN (SELECT t.group_number FROM ret t)
+			   AND (c.group_number IS NULL OR c.deleted_count <> rg.deleted_count)
+		), dirty AS (
+			SELECT coalesce(range_agg(tstzrange(date_bin(%4$L::interval, ch.ts_min, %6$L::timestamptz),
+												date_bin(%4$L::interval, ch.ts_max, %6$L::timestamptz)
+												+ %17$L::interval))
+								FILTER (WHERE ch.ts_min IS NOT NULL), '{}') AS b,
+				   coalesce(bool_or(ch.ts_has_null), false) AS n
+			  FROM changed ch
+		), kept AS (
+			SELECT x.history + coalesce((SELECT range_agg(tstzrange(t.ts_min, t.ts_max, '[]')) FROM retiring t
+										  WHERE t.ts_min IS NOT NULL), '{}') AS m,
+				   x.history_has_null OR coalesce((SELECT bool_or(t.ts_has_null) FROM retiring t), false) AS n
+			  FROM pgcolumnar.rollup x WHERE x.rollup = %2$L::regclass
+		), blocked AS (
+			SELECT 1 FROM dirty d, kept k WHERE d.b && k.m OR (d.n AND k.n)
+			UNION ALL
+			-- rows deleted since the last refresh from a group expire then
+			-- retired: they are gone, so their buckets cannot be recomputed
+			SELECT 1 FROM retiring t JOIN ret x USING (group_number)
+			 WHERE x.deleted_count <> t.deleted_count
 		), new_groups AS (
 			SELECT c.* FROM cur c
-			 WHERE NOT EXISTS (SELECT 1 FROM pgcolumnar.rollup_group rg
-								WHERE rg.rollup = %2$L::regclass AND rg.group_number = c.group_number)
+			 WHERE NOT EXISTS (SELECT 1 FROM rec rg WHERE rg.group_number = c.group_number)
 		), rows AS MATERIALIZED (
-			SELECT s.* FROM new_groups ng, held,
+			SELECT ng.group_number AS pgcolumnar__group, s.* FROM new_groups ng, held,
 			LATERAL (SELECT %3$s FROM %1$s
 					  WHERE ctid >= pgcolumnar.row_tid(ng.first_row_number)
 						AND ctid <= pgcolumnar.row_tid(ng.first_row_number + ng.row_count - 1)
@@ -2571,9 +2620,28 @@ BEGIN
 					 -- PostgreSQL builds a TID range scan only from a relation's own
 					 -- restrictions, and as a join clause the range read every group.
 					 OFFSET 0) s
+		), fold AS (
+			SELECT w.* FROM rows w, dirty d
+			 WHERE NOT CASE WHEN w.%5$I IS NULL THEN d.n
+							ELSE d.b @> date_bin(%4$L::interval, w.%5$I, %6$L::timestamptz) END
+		), recomputed AS MATERIALIZED (
+			-- one range predicate per span of dirty buckets, so zone maps prune
+			SELECT s.* FROM dirty d, held, unnest(d.b) u(span),
+			LATERAL (SELECT %3$s FROM %1$s
+					  WHERE %5$I >= lower(u.span) AND %5$I < upper(u.span) OFFSET 0) s
+			UNION ALL
+			SELECT s.* FROM dirty d, held,
+			LATERAL (SELECT %3$s FROM %1$s WHERE %5$I IS NULL OFFSET 0) s
+			 WHERE d.n
 		), delta AS (
 			SELECT date_bin(%4$L::interval, %5$I, %6$L::timestamptz) AS bucket%7$s%8$s
-			  FROM rows GROUP BY 1%9$s
+			  FROM fold GROUP BY 1%9$s
+		), redo AS (
+			SELECT date_bin(%4$L::interval, %5$I, %6$L::timestamptz) AS bucket%7$s%8$s
+			  FROM recomputed GROUP BY 1%9$s
+		), cleared AS (
+			DELETE FROM %10$s p USING dirty d
+			 WHERE CASE WHEN p.bucket IS NULL THEN d.n ELSE d.b @> p.bucket END
 		), upd AS (
 			UPDATE %10$s p SET %11$s
 			  FROM delta d WHERE p.bucket IS NOT DISTINCT FROM d.bucket%12$s
@@ -2582,11 +2650,34 @@ BEGIN
 			INSERT INTO %10$s (bucket%7$s%14$s)
 			SELECT d.bucket%15$s%16$s FROM delta d
 			 WHERE NOT EXISTS (SELECT 1 FROM upd p WHERE p.bucket IS NOT DISTINCT FROM d.bucket%12$s)
+		), reins AS (
+			INSERT INTO %10$s (bucket%7$s%14$s)
+			SELECT d.bucket%15$s%16$s FROM redo d
+		), forgotten AS (
+			DELETE FROM pgcolumnar.rollup_group rg
+			 WHERE rg.rollup = %2$L::regclass
+			   AND (rg.group_number IN (SELECT t.group_number FROM retiring t)
+					OR rg.group_number IN (SELECT ch.group_number FROM changed ch WHERE ch.now_rows IS NULL))
+		), recounted AS (
+			UPDATE pgcolumnar.rollup_group rg
+			   SET row_count = ch.now_rows, deleted_count = ch.now_deleted
+			  FROM changed ch
+			 WHERE rg.rollup = %2$L::regclass AND rg.group_number = ch.group_number
+			   AND ch.now_rows IS NOT NULL
 		), recorded AS (
 			INSERT INTO pgcolumnar.rollup_group
-			SELECT %2$L::regclass, ng.group_number, ng.row_count, ng.deleted_count FROM new_groups ng
+			SELECT %2$L::regclass, ng.group_number, ng.row_count, ng.deleted_count,
+				   x.lo, x.hi, coalesce(x.has_null, false)
+			  FROM new_groups ng
+			  LEFT JOIN (SELECT w.pgcolumnar__group, min(w.%5$I) AS lo, max(w.%5$I) AS hi,
+								bool_or(w.%5$I IS NULL) AS has_null
+						   FROM rows w GROUP BY 1) x ON x.pgcolumnar__group = ng.group_number
+		), historied AS (
+			UPDATE pgcolumnar.rollup x SET history = k.m, history_has_null = k.n
+			  FROM kept k WHERE x.rollup = %2$L::regclass AND EXISTS (SELECT 1 FROM retiring)
 		)
-		SELECT count(*) FROM rows
+		SELECT (SELECT count(*) FROM fold) + (SELECT count(*) FROM recomputed),
+			   EXISTS (SELECT 1 FROM blocked)
 		$f$,
 		r.source, r.rollup, rowcols, r.width, r.ts_column, r.origin,
 		keys, dsel,
@@ -2595,14 +2686,21 @@ BEGIN
 		(SELECT coalesce(string_agg(format(', p.%I', x), ''), '') FROM unnest(r.group_by) x),
 		icols,
 		(SELECT coalesce(string_agg(format(', d.%I', x), ''), '') FROM unnest(r.group_by) x),
-		isel)
-	INTO folded;
+		isel, wabs)
+	INTO folded, refused;
+	-- Raised after the statement, so everything it wrote rolls back with it.
+	IF refused THEN
+		RAISE EXCEPTION 'rollup %: a changed row group of its source reaches buckets whose raw rows retention removed', rollup
+			USING ERRCODE = 'feature_not_supported',
+				  DETAIL = 'Recomputing those buckets from the source would drop the history they keep, or the rows to recompute them from are gone.',
+				  HINT = 'If the rollup is right as it stands, pgcolumnar.rebase_rollup records the source''s current row groups.';
+	END IF;
 	RETURN folded;
 END
 $rr$;
 
 COMMENT ON FUNCTION pgcolumnar.refresh_rollup(regclass)
-	IS 'fold the rows of the row groups appended to a rollup''s source since its last refresh, in one statement; returns the rows folded (#1294, phase 1: appends only)';
+	IS 'bring a rollup up to date in one statement: fold the rows of row groups appended to its source since the last refresh, and recompute the buckets of groups deleted from or rewritten since, except buckets that keep retained history; returns the rows folded and recomputed (#1294)';
 
 CREATE FUNCTION pgcolumnar.rebase_rollup(rollup regclass)
 	RETURNS bigint
@@ -2620,10 +2718,19 @@ BEGIN
 	EXECUTE format('LOCK TABLE %s IN SHARE UPDATE EXCLUSIVE MODE', r.partials);
 	-- The caller asserts the rollup is current: the source's groups are recorded
 	-- as folded, and the rollup's rows are not touched (#1294 point 9).
+	-- Each group's time range is read from its rows, one TID range per group,
+	-- so a rebase reads the whole source. The history stays as it was.
 	DELETE FROM pgcolumnar.rollup_group rg WHERE rg.rollup = r.rollup;
-	INSERT INTO pgcolumnar.rollup_group
-		SELECT r.rollup, s.group_number, s.row_count, s.deleted_count
-		  FROM pgcolumnar.rollup_source_groups(r.source) s;
+	EXECUTE format($f$
+		INSERT INTO pgcolumnar.rollup_group
+		SELECT %2$L::regclass, s.group_number, s.row_count, s.deleted_count,
+			   x.lo, x.hi, coalesce(x.has_null, false)
+		  FROM pgcolumnar.rollup_source_groups(%1$L::regclass) s,
+		  LATERAL (SELECT min(%3$I) AS lo, max(%3$I) AS hi, bool_or(%3$I IS NULL) AS has_null
+					 FROM %1$s
+					WHERE ctid >= pgcolumnar.row_tid(s.first_row_number)
+					  AND ctid <= pgcolumnar.row_tid(s.first_row_number + s.row_count - 1)) x
+		$f$, r.source, r.rollup, r.ts_column);
 	GET DIAGNOSTICS n = ROW_COUNT;
 	UPDATE pgcolumnar.rollup x SET source_storage = pgcolumnar.get_storage_id(r.source)
 	 WHERE x.rollup = r.rollup;

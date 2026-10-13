@@ -1576,4 +1576,34 @@ suites_not_covered 246
 #     never         1796 +  3 = 1799
 #     dated          463 +  8 =  471
 #     1799 + 471 == 2270
-checks_never_observed_red 1799
+#
+# #1294 phase 2, dirty buckets (jdatcmd): 1799 -> 1800. rollup gains 17 checks
+# from a five-major run (70/70 on each of 15-19) and loses three. Fourteen of
+# the new are dated by twelve mutations of the refresh and of rebase_rollup, and
+# by the phase-1 code itself (these tests on main's refresh, 10 red on each
+# major); three arrive `never`, all premises (compact_rewrite rewrote a group,
+# expire kept the straddling group, partials beyond the delete's reach). One
+# more mutation, ignoring a changed row count, reddened nothing, and the
+# condition was removed from the code instead of kept untested. The three
+# removed rows are phase 1's refusal of a delete and its two companions: phase
+# 2 replaced that behaviour, so "a refresh after a delete is refused until
+# phase 2" goes with its history (dated, refresh_rollup without the
+# changed-group refusal), and "the refused refresh changed nothing" and "the
+# rollup holds rows before the delete" go as never.
+#
+#     ledger rows   2270 - 3 + 17 = 2284
+#     never         1799 - 2 +  3 = 1800
+#     dated          471 - 1 + 14 =  484
+#     1800 + 484 == 2284
+#
+# #1328 review (OffgridwithJD found rows deleted from a group that expire then
+# retires were kept in history): 1800 -> 1801. rollup gains two checks from a
+# five-major run (72/72 on each of 15-19): the refusal, dated by two mutations
+# (the refusal removed, and expire recording the deleted count as 0), each red
+# at it alone on every major; and its premise, that expire retired the group.
+#
+#     ledger rows   2284 + 2 = 2286
+#     never         1800 + 1 = 1801
+#     dated          484 + 1 =  485
+#     1801 + 485 == 2286
+checks_never_observed_red 1801

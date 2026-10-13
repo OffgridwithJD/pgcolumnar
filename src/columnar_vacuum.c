@@ -2626,9 +2626,20 @@ pgcolumnar_expire(PG_FUNCTION_ARGS)
 										   att->attcollation, maxv, cutoff));
 		if (c < 0)
 		{
+			/*
+			 * The deleted count is read before the group's delete vector goes
+			 * with it: the same stored count a rollup's refresh compares (#1328).
+			 */
+			uint64		deleted = 0;
+			ListCell   *dc;
+
+			foreach(dc, PgColumnarReadDeleteVectorList(storageId, rg->groupNumber,
+													  GetActiveSnapshot()))
+				deleted += (uint64) ((DeleteVectorMetadata *) lfirst(dc))->deletedCount;
+
 			PgColumnarVMClearForRowRange(rel, rg->firstRowNumber, rg->rowCount);
 			PgColumnarRetireGroup(storageId, rg->groupNumber);
-			PgColumnarRecordRetention(storageId, rg->groupNumber);
+			PgColumnarRecordRetention(storageId, rg->groupNumber, deleted);
 			retired++;
 		}
 	}

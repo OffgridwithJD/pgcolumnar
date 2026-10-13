@@ -152,7 +152,8 @@
 #define Anum_retired_group_storage_id 1
 #define Anum_retired_group_group_number 2
 #define Anum_retired_group_retired_at 3
-#define Natts_retired_group 3
+#define Anum_retired_group_deleted_count 4
+#define Natts_retired_group 4
 
 /* attribute numbers for columnar.delete_vector (spec 7.5) */
 #define Anum_delete_vector_storage_id 1
@@ -985,11 +986,13 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
  *		Record that pgcolumnar.expire retired a row group for retention (#1294).
  *		An incremental rollup that keeps history must not recompute a bucket whose
  *		raw rows retention dropped, and this row is how its refresh tells such a
- *		group from one a delete or a rewrite removed. Called only by expire, in its
+ *		group from one a delete or a rewrite removed. deletedCount is the group's
+ *		deleted count at retirement, so a refresh can tell that rows were deleted
+ *		since it last folded the group (#1328). Called only by expire, in its
  *		transaction, so a rolled-back expire leaves no record.
  */
 void
-PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber)
+PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber, uint64 deletedCount)
 {
 	Relation	rel = open_columnar_table("retired_group", RowExclusiveLock);
 	Datum		values[Natts_retired_group];
@@ -1000,6 +1003,7 @@ PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber)
 	values[Anum_retired_group_storage_id - 1] = Int64GetDatum((int64) storageId);
 	values[Anum_retired_group_group_number - 1] = Int64GetDatum((int64) groupNumber);
 	values[Anum_retired_group_retired_at - 1] = TimestampTzGetDatum(GetCurrentTransactionStartTimestamp());
+	values[Anum_retired_group_deleted_count - 1] = Int64GetDatum((int64) deletedCount);
 
 	tuple = heap_form_tuple(RelationGetDescr(rel), values, nulls);
 	CatalogTupleInsert(rel, tuple);

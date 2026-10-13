@@ -184,9 +184,8 @@ true until the next version shipped.
   concurrent refreshes fold each row once. The rollup equals a full recompute:
   exactly for counts, integer sums and averages, min and max, and within 1e-12
   for `float8` averages. Rows that `expire` retires keep their buckets in the
-  rollup, so the rollup's history outlives the raw data. This phase refuses any
-  other delete or update in the source (`0A000`) and a rewritten source
-  (`55000`, until `pgcolumnar.rebase_rollup`). Each group's TID range comes from
+  rollup, so the rollup's history outlives the raw data. A rewritten source is
+  refused (`55000`, until `pgcolumnar.rebase_rollup`). Each group's TID range comes from
   the access method's own mapping (`pgcolumnar.row_tid`), not a block size
   restated in SQL.
   The rollup catalogs carry row-level security, so each role sees only the
@@ -194,6 +193,24 @@ true until the next version shipped.
   pulled up into a join read every row group (114 blocks of a 103-block table
   for one new group), because PostgreSQL builds a TID range scan only from a
   relation's own restrictions; `OFFSET 0` keeps it a scan (15 blocks).
+- Incremental rollups, phase 2: dirty buckets (#1294). `refresh_rollup` no longer
+  refuses deletes, updates and `compact_rewrite` in the source. In the same one
+  statement, it recomputes from the source every bucket a changed row group's
+  rows fall in, and folds new groups into the other buckets only, so a row is
+  never counted twice. Each recorded group now carries the time range of its
+  rows, since a group that is gone has no zone maps left. A recompute never
+  touches history: when a bucket to recompute holds rows retention dropped, the
+  refresh is refused (`0A000`) and writes nothing. The retired groups' ranges
+  are kept as a `tstzmultirange` on `pgcolumnar.rollup`. `rebase_rollup` now reads
+  each group's range from its rows. Found while it was written: retirement read
+  in a statement before the fold would let an `expire` that commits in between
+  look like a delete and lose history, so it is read in the fold's own snapshot;
+  and a bucket's end is its start plus the width in plain seconds, because a
+  `timestamptz` plus `'1 day'` is 23 or 25 hours across a DST change.
+  From @OffgridwithJD's review: rows deleted from a group that `expire` then
+  retires, before the next refresh, cannot be recomputed and would be kept as
+  history, so such a refresh is refused (`0A000`) too; `expire` now records each
+  retired group's deleted count in `pgcolumnar.retired_group` for this.
 - `pgcolumnar.tier_partition(partition, server, path, lock_wait)` moves a cold
   columnar partition to a Parquet file and attaches the file in its place as a
   foreign partition with the same name, bounds, grants and comment (#1295). It
