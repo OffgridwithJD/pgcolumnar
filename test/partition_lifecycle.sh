@@ -204,10 +204,12 @@ plan() { q "SELECT string_agg(s, E'\n') FROM pgcolumnar.partition_drop_plan('$1'
 # The drop each partition gets: a DO block that refuses (55000) while the partition
 # is still attached, so a DETACH that failed cannot be followed by a DROP that takes
 # ACCESS EXCLUSIVE on the parent (jdatcmd, #1331 review).
+sqlit() { local x="${1//\'/\'\'}"; printf "'%s'" "$x"; }	# a SQL string literal
 gdrop() {	# gdrop 'TABLE'|'FOREIGN TABLE' QUALIFIED-NAME -> the planned statement
-	local lit="'${2//\'/\'\'}'"
-	printf "DO \$pgcolumnar_drop\$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %s::regclass) THEN RAISE EXCEPTION '%% is still attached to its parent; its DETACH did not finish', %s USING ERRCODE = '55000'; END IF; DROP %s %s; END \$pgcolumnar_drop\$" \
-		"$lit" "$lit" "$1" "$2"
+	# The body is a string literal, not dollar-quoted, so no name can end it.
+	local body
+	body="BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = $(sqlit "$2")::regclass) THEN RAISE EXCEPTION '% is still attached to its parent; its DETACH did not finish', $(sqlit "$2") USING ERRCODE = '55000'; END IF; DROP $1 $2; END"
+	printf 'DO %s' "$(sqlit "$body")"
 }
 run_plan() {	# each statement top-level, as \gexec would run it
 	local line

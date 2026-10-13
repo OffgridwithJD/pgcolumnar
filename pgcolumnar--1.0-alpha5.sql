@@ -2312,9 +2312,13 @@ BEGIN
 	LOOP
 		RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s %s', parent, p.part,
 		                   CASE WHEN p.pending THEN 'FINALIZE' ELSE 'CONCURRENTLY' END);
-		RETURN NEXT format('DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION ''%% is still attached to its parent; its DETACH did not finish'', %L USING ERRCODE = ''55000''; END IF; DROP %s %s; END $pgcolumnar_drop$',
-		                   p.part::text, p.part::text,
-		                   CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
+		-- the body as a literal, not dollar-quoted: no name can end it (#1331 review)
+		RETURN NEXT format('DO %L',
+		                   format('BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION %L, %L USING ERRCODE = %L; END IF; DROP %s %s; END',
+		                          p.part::text,
+		                          '% is still attached to its parent; its DETACH did not finish',
+		                          p.part::text, '55000',
+		                          CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part));
 	END LOOP;
 END
 $drop_plan_tz$;
@@ -2337,9 +2341,13 @@ BEGIN
 	LOOP
 		RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s %s', parent, p.part,
 		                   CASE WHEN p.pending THEN 'FINALIZE' ELSE 'CONCURRENTLY' END);
-		RETURN NEXT format('DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION ''%% is still attached to its parent; its DETACH did not finish'', %L USING ERRCODE = ''55000''; END IF; DROP %s %s; END $pgcolumnar_drop$',
-		                   p.part::text, p.part::text,
-		                   CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
+		-- the body as a literal, not dollar-quoted: no name can end it (#1331 review)
+		RETURN NEXT format('DO %L',
+		                   format('BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION %L, %L USING ERRCODE = %L; END IF; DROP %s %s; END',
+		                          p.part::text,
+		                          '% is still attached to its parent; its DETACH did not finish',
+		                          p.part::text, '55000',
+		                          CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part));
 	END LOOP;
 END
 $drop_plan_ts$;
