@@ -556,4 +556,5 @@ guard_tests 413
 # collected over the cluster files on the tree rebased onto 503f080 (#1286).
 # 498 -> 500 for the TID range scan pair: test_tid_range_scan.py's two tests.
 # Collected on this tree, after #1304.
-cluster_tests 500
+# 500 -> 501 for #1297's test_partition_lifecycle.py, collected on this tree.
+cluster_tests 501

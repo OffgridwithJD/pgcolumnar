@@ -89,6 +89,21 @@ true until the next version shipped.
   scan backward, and without it the fetch reached the access method and failed.
   The Material's plan node id now sits above the subplans' ids as well, so a
   cursor whose query has a subquery no longer repeats a node id.
+- `pgcolumnar.partition_create_ahead(parent, width, ahead)` keeps a
+  time-partitioned table ready for the rows that are coming (#1297). It creates
+  columnar partitions, each `width` wide and contiguous with the highest existing
+  upper bound, until they reach now plus `ahead` widths; a second call creates
+  none. It takes `SHARE UPDATE EXCLUSIVE` on the parent, never `ACCESS
+  EXCLUSIVE`, and refuses a parent with a DEFAULT partition. For a `timestamp`
+  key, "now" is the session's local time. The arms found that the first version
+  read a `timestamp` key's bounds in the session's zone and wrote them from UTC,
+  which left a four-hour gap between partitions in New York and started daily
+  partitions at 15:00 in Tokyo. `test/partition_lifecycle.sh` and its pytest
+  twin hold each statement in sessions west and east of UTC. It also copes with a
+  stored generated column on the parent and with a parent name up to 63 bytes
+  long, and refuses, before creating anything, a call that would create more
+  than 1000 partitions (`22023`) and a parent with a partition bounded by
+  `MAXVALUE` (`55000`).
 
 ### Changed
 

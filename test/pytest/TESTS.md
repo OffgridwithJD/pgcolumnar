@@ -138,6 +138,7 @@ behaviour, the source of that number is named.
 - [90. test_partman_columnar.py: pg_partman makes columnar partitions with one setting](#90-test_partman_columnarpy-pg_partman-makes-columnar-partitions-with-one-setting)
 - [91. test_capability_decline.py: a missing pyarrow declines by name, and nothing declines silently](#91-test_capability_declinepy-a-missing-pyarrow-declines-by-name-and-nothing-declines-silently)
 - [92. test_tid_range_scan.py: a ctid range reads only the row groups that hold it](#92-test_tid_range_scanpy-a-ctid-range-reads-only-the-row-groups-that-hold-it)
+- [93. test_partition_lifecycle.py: partition_create_ahead keeps a time-partitioned parent ahead of now](#93-test_partition_lifecyclepy-partition_create_ahead-keeps-a-time-partitioned-parent-ahead-of-now)
 
 ## 1. How to read a test in here
 
@@ -6518,3 +6519,19 @@ THE MATERIAL'S NODE ID. `set_plan_references` numbers the main tree and then the
 | --- | --- |
 | `test_a_ctid_range_reads_only_its_row_groups` | the table has its rows and many groups; a ctid range plans a TID range scan; eleven ranges, including offsets 0, 291, 500 and 65535, return what the per-row filter returns; a rescanned scan does too; a SCROLL cursor and a plain cursor fetch backward correctly, and so does a SCROLL cursor whose query has a subplan; rows inserted earlier in the transaction are in the range; the tail range reads at least one block and under a fifth of the table; deleted rows stay deleted; after compaction moves rows, ranges over the old and new addresses return what the filter returns |
 | `test_a_parallel_tid_range_scan_returns_what_the_filter_returns` | PostgreSQL 19+: the range runs as a parallel TID range scan with two workers launched, and returns what the filter returns. Below 19, `UNSUPPORTED_MAJOR` |
+
+## 93. test_partition_lifecycle.py: partition_create_ahead keeps a time-partitioned parent ahead of now
+
+Port of `partition_lifecycle.sh` (#1297). `pgcolumnar.partition_create_ahead(parent, width, ahead)` makes columnar partitions, each `width` wide and contiguous with the highest existing upper bound, until they reach now plus `ahead` widths. It uses a standalone CREATE then ATTACH, so the parent is held SHARE UPDATE EXCLUSIVE, never ACCESS EXCLUSIVE. A DEFAULT partition is refused (`55000`).
+
+THE SESSION'S ZONE IS WHERE THE PROTOTYPE BROKE. A `timestamp` key holds wall-clock time. The prototype read its bounds as timestamptz in the session's zone and wrote the next ones converted from UTC. In America/New_York that left a four-hour gap between partitions, so a row at the boundary had nowhere to go; and daily partitions made from Tokyo started at 15:00. The arms continue from hand-made partitions in sessions west and east of UTC, and check contiguity, routing at every boundary, coverage of the session's local now, and alignment to the width in the key's own wall clock. This file uses six-hour widths, and Asia/Kolkata for a half-hour offset.
+
+Four inputs from @jdatcmd's review of #1308, each an arm red against the first version: a stored generated column (LIKE without INCLUDING GENERATED, `42804` at ATTACH); a 63-character name (the date suffix truncated and the second partition collided; the twin uses 31 two-byte characters so truncation must never split one); a call creating more than 1000 partitions (it ran 11 minutes and failed `53200`; now refused with `22023` before any DDL); and a MAXVALUE bound (an overlap; now refused with `55000`).
+
+Removal proofs, each red in both twins: the prototype's zone handling; `CREATE TABLE ... PARTITION OF` (the lock arm); no DEFAULT refusal; starting from now rather than the highest bound (a second call fails); heap partitions; stopping one width short (the coverage arms); a minute's gap between partitions (the contiguity and boundary arms); and one mutant per #1308 fix. The `one_short` mutation also reddened "rows within the covered range go in", so that check is not a premise (#1236).
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_partition_create_ahead` | from nothing it reaches now plus the lead, columnar, contiguous and one width wide; a second call creates nothing, and asking further ahead creates only the difference; rows land in columnar partitions; the parent is never held ACCESS EXCLUSIVE; west of UTC, for both key types, partitions continue a hand-made one contiguously and a row at every boundary routes; east of UTC, a timestamp parent covers the local now and starts on the width's boundary; inputs that broke the first version (a generated column, a 63-character name, more than 1000 partitions, a MAXVALUE bound) are handled or refused before any DDL; a DEFAULT partition is refused and nothing is created |

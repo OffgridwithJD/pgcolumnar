@@ -570,6 +570,19 @@ Writes the live rows of `rel` to a Parquet file at `path`. Returns the number of
 rows written. `path` can be a local file or an `s3://` URL. See
 [Object storage](#object-storage).
 
+### pgcolumnar.partition_create_ahead(parent regclass, width interval, ahead int) returns int
+
+Creates columnar partitions of `parent`, each `width` wide, until they reach now
+plus `ahead` widths. Returns the number of partitions created. A second call
+creates none. The first new partition starts at the highest existing upper
+bound. With no partitions, it starts at the width's boundary that holds now.
+`parent` must be partitioned by RANGE on one `timestamp` or `timestamptz`
+column. It must have no DEFAULT partition and no partition bounded by
+`MAXVALUE` (`55000`). A call that would create more than 1000 partitions is
+refused before it creates any (`22023`). The function takes
+`SHARE UPDATE EXCLUSIVE` on the parent, never `ACCESS EXCLUSIVE`. See
+[Create time partitions ahead](how-to.md#create-time-partitions-ahead).
+
 ### pgcolumnar.import_arrow(rel regclass, path text) returns bigint
 
 Inserts the rows of an Arrow IPC stream file at `path` into the existing table
