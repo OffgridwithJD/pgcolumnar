@@ -563,14 +563,20 @@ HIGHK="SELECT k, count(*), sum(i) FROM %T GROUP BY k"
 # or its error. The query runs itself: wrapped in SELECT count(*) FROM (...), the
 # planner drops the unused aggregates and the node refuses that shape, so the
 # wrapper would measure a different plan.
+# Both helpers turn hash aggregation and sorting off, so the grouped path wins
+# whenever the gate offers it: these arms test the gate, not the cost model. A
+# declined query still runs, on the disabled plan. Without this, a gate that let a
+# skewed key through could still lose on cost, and the arm would stay green.
 groups_or_error() {
 	local out
 	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+		-c "SET enable_hashagg = off" -c "SET enable_sort = off" \
 		-c "SET pgcolumnar.groupagg_max_groups = $1" -c "$2" 2>&1)"
 	if grep -q '^ERROR' <<<"$out"; then grep -m1 '^ERROR' <<<"$out"; else grep -c '' <<<"$out"; fi
 }
 under_cap() {	# under_cap CAP QUERY -> 1 when the grouped node is planned under that cap
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+		-c "SET enable_hashagg = off" -c "SET enable_sort = off" \
 		-c "SET pgcolumnar.groupagg_max_groups = $1" -c "EXPLAIN (COSTS OFF) $2" 2>&1 \
 		| grep -c 'Columnar Vectorized Group Keys'
 }
