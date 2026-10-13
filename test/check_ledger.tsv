@@ -1939,7 +1939,7 @@ projection_parallel	projection_parallel	premise: a parallel base scan is availab
 projection_parallel	projection_parallel	premise: a serial covering query uses the projection	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: the covering plan is parallel at the default page cost	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: the table holds every inserted row	15;16;17;18;19	never	-
-projection_parallel	projection_parallel	workers share the covering projection scan, it is not a single claimer	15;16;17;18;19	2026-09-18	first-wins-claimer
+projection_parallel	projection_parallel	workers share the covering projection scan, it is not a single claimer	15;16;17;18;19	2026-10-13	first-wins-claimer;only the first parallel worker claims row groups, so one worker scans the whole table (#1336)
 projection_scan_cost	projection_scan_cost	a clause that mentions the sort key but cannot prune on it does not cheapen a covering projection	15;16;17;18;19	2026-10-12	a covering projection is discounted for any clause that mentions the sort key, as before #1126
 projection_scan_cost	projection_scan_cost	a non-sort-key restriction does not cheapen a covering projection	15;16;17;18;19	2026-09-18	-
 projection_scan_cost	projection_scan_cost	a tight covering projection is cheaper relative to the base than a loose one	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount

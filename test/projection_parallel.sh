@@ -125,12 +125,26 @@ worker_rows() {
 serial_plan="$(explain_cov 0 on)"
 par_off_plan="$(explain_cov 2 off)"
 par_on_plan="$(explain_cov 2 on)"
-par_on_ana="$(analyze_cov 2 on)"
 par_on_count="$(count_cov 2 on)"
 
-rows_list="$(worker_rows "$par_on_ana")"
-n_lines="$(echo "$rows_list" | grep -c . || true)"
-n_busy="$(echo "$rows_list" | awk '$1>0{n++} END{print n+0}')"
+# UP TO FIVE ANALYZE ATTEMPTS, STOPPING AT THE FIRST THAT SHOWS BOTH WORKERS BUSY
+# (#1336). On a correct build a worker that starts late can find every row group
+# already claimed: legitimate parallel behaviour, seen once in a 19beta2 cassert
+# matrix (1 of 12 runs on that host) and in 0 of 44 here, idle and 8-way loaded.
+# The defect the arm is named for is single BY CONSTRUCTION -- one claimer on every
+# run -- so it still fails all five, while a correct build fails only if the race
+# goes the wrong way five times running. The premises read the attempt that was
+# used, and every attempt is printed.
+attempts=""
+for _try in 1 2 3 4 5; do
+	par_on_ana="$(analyze_cov 2 on)"
+	rows_list="$(worker_rows "$par_on_ana")"
+	n_lines="$(echo "$rows_list" | grep -c . || true)"
+	n_busy="$(echo "$rows_list" | awk '$1>0{n++} END{print n+0}')"
+	attempts="$attempts${attempts:+; }try $_try: $(echo "$rows_list" | tr '\n' ' ')"
+	[ "$n_busy" = 2 ] && break
+done
+echo "-- worker rows per ANALYZE attempt: $attempts"
 
 echo "-- serial:"
 printf '%s\n' "$serial_plan"
@@ -255,7 +269,7 @@ check "premise: ANALYZE printed a rows= line per launched worker" \
 
 # THE DEFECT the plan-shape arms cannot see: Gather is present and the count
 # is right when one backend claims every stripe. Sharing means both launched
-# workers produced rows.
+# workers produced rows, in at least one of the attempts above.
 check "workers share the covering projection scan, it is not a single claimer" \
 	"$n_busy" "2"
 
