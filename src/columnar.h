@@ -610,7 +610,8 @@ extern void PgColumnarCloseZoneMapSession(PgColumnarZoneMapSession *sess);
 extern List *PgColumnarReadWholeChunkZoneMapsForColumn(uint64 storageId, int columnIndex,
 													   Snapshot snapshot);
 extern void PgColumnarDeleteMetadata(uint64 storageId);
-extern void PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber);
+extern void PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber,
+									  uint64 deletedCount);
 
 /* pgcolumnar.column_extent (#1304 option 5): columnar_metadata.c */
 typedef struct NativeExtentRow

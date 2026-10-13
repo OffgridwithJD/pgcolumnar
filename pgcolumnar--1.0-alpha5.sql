@@ -330,13 +330,17 @@ CREATE INDEX free_space_fit
  * refresh must tell a group retired by retention from one deleted or
  * rewritten; this is where it looks. Nothing but expire writes here: a
  * compaction's retired groups are a change to the data, not retention.
+ * deleted_count is the group's deleted count when expire retired it: rows
+ * deleted after a rollup's last refresh cannot be recomputed once the group is
+ * gone, and this is how the refresh sees that (found on #1328).
  * Deleted with the storage's other metadata.
  * ------------------------------------------------------------------------- */
 
 CREATE TABLE pgcolumnar.retired_group (
 	storage_id bigint NOT NULL,
 	group_number bigint NOT NULL,
-	retired_at timestamptz NOT NULL
+	retired_at timestamptz NOT NULL,
+	deleted_count bigint NOT NULL
 );
 CREATE UNIQUE INDEX retired_group_pkey
 	ON pgcolumnar.retired_group USING btree (storage_id, group_number);
@@ -2300,14 +2304,14 @@ $rsg$;
  * no GRANT; the caller must be able to SELECT the source.
  */
 CREATE FUNCTION pgcolumnar.rollup_source_retired(source regclass)
-	RETURNS TABLE (group_number bigint)
+	RETURNS TABLE (group_number bigint, deleted_count bigint)
 	LANGUAGE plpgsql STABLE SECURITY DEFINER
 	SET search_path = pg_catalog, pg_temp
 AS $rsr$
 BEGIN
 	PERFORM pgcolumnar.require_caller_select(source);
 	RETURN QUERY
-		SELECT r.group_number FROM pgcolumnar.retired_group r
+		SELECT r.group_number, r.deleted_count FROM pgcolumnar.retired_group r
 		 WHERE r.storage_id = pgcolumnar.get_storage_id(source);
 END
 $rsr$;
@@ -2599,6 +2603,11 @@ BEGIN
 			  FROM pgcolumnar.rollup x WHERE x.rollup = %2$L::regclass
 		), blocked AS (
 			SELECT 1 FROM dirty d, kept k WHERE d.b && k.m OR (d.n AND k.n)
+			UNION ALL
+			-- rows deleted since the last refresh from a group expire then
+			-- retired: they are gone, so their buckets cannot be recomputed
+			SELECT 1 FROM retiring t JOIN ret x USING (group_number)
+			 WHERE x.deleted_count <> t.deleted_count
 		), new_groups AS (
 			SELECT c.* FROM cur c
 			 WHERE NOT EXISTS (SELECT 1 FROM rec rg WHERE rg.group_number = c.group_number)
@@ -2683,7 +2692,7 @@ BEGIN
 	IF refused THEN
 		RAISE EXCEPTION 'rollup %: a changed row group of its source reaches buckets whose raw rows retention removed', rollup
 			USING ERRCODE = 'feature_not_supported',
-				  DETAIL = 'Recomputing those buckets from the source would drop the history they keep.',
+				  DETAIL = 'Recomputing those buckets from the source would drop the history they keep, or the rows to recompute them from are gone.',
 				  HINT = 'If the rollup is right as it stands, pgcolumnar.rebase_rollup records the source''s current row groups.';
 	END IF;
 	RETURN folded;
