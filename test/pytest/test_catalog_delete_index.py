@@ -363,6 +363,11 @@ def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_own_db, expect
             "INSERT INTO retire_deep "
             f"SELECT g, g % 7, g % 13, 'x' || g FROM generate_series(1,{DEEP_ROWS}) g"
         )
+    # READ BEFORE PHASE B BUILDS ITS TARGETS (#1339), as the shell twin does: this
+    # asks whether the DEEP TABLE grew the catalogs. Measured after phase B's own
+    # three tables exist, their growth was folded in and the premise held with the
+    # deep table's INSERT removed.
+    pages_after_deep = _catpages(conn)
 
     db, sb, pages_b, margin_b = _phase(
         conn, expect, "B", "retB", BIG_GROUPS, READ_WHOLE, "read-whole", carried=7
@@ -377,7 +382,7 @@ def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_own_db, expect
     # row was secretly the same database, and the only thing that said so was
     # this quantity, flat where it should have grown eightfold.
     expect.at_least(
-        pages_b - pages_a,
+        pages_after_deep - pages_a,
         1,
         "premise: the deep table grew the catalogs it is there to grow",
     )
