@@ -571,4 +571,7 @@ guard_tests 415
 #
 # cluster_tests 509 -> 510 for #1290's test_autovacuum_expire.py, by collection
 # on this branch rebased onto c0ee868.
-cluster_tests 510
+#
+# cluster_tests 510 -> 511 for #1294's test_rollup.py, one test, collected over the
+# cluster files on this branch rebased onto b6656ac (#1307).
+cluster_tests 511

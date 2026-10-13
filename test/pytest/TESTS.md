@@ -6608,7 +6608,9 @@ What the arms found while the code was written:
 - Every arm run as a superuser bypassed the row-level security on the rollup catalogs. An owner and a stranger are now ordinary roles; PUBLIC has no USAGE on schema `pgcolumnar` (by design, docs/administration.md), so the test grants it as an administrator would.
 - The first draft's source load overflowed `int` and left the table empty, and three arms passed on emptiness; each has a premise that requires a real measure now.
 
-Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation check, no lock (two refreshes double-fold), no identity check, no changed-group check, the folded groups recorded from a fresh read (rows committed mid-refresh lost), min combined as max, no row-level security, and a rebase that clears the rollup.
+From @jdatcmd's review of #1319: the refresh restated 291 rows a block in SQL, which holds only at the default block size, so the TID range of each group now comes from `pgcolumnar.row_tid` (the access method's own mapping), and an arm requires every group's range to hold exactly its rows. NULL group keys and NULL timestamps have an arm in each twin, and writing it showed both twins' digests dropped any row with a NULL (`||` then `string_agg`); they use `concat_ws` over `coalesce` now. Retention keeps history: a group `expire` retired leaves the snapshot and its buckets keep their rows (#1314's `retired_group`).
+
+Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation check, no lock (two refreshes double-fold), no identity check, no changed-group check, the folded groups recorded from a fresh read (rows committed mid-refresh lost), min combined as max, no row-level security, a rebase that clears the rollup, `=` in place of `IS NOT DISTINCT FROM` (only the NULL arm), retired groups kept in the snapshot, and `row_tid` with 290 rows a block.
 
 ### Every test
 

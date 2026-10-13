@@ -100,7 +100,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                 "the rollup table exists with the documented columns")
 
     expect.text(_refresh(conn), "24000", "the first refresh folds every row")
-    expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
+    expect.text(_matches(conn), _oracle(conn), "and after the first refresh the rollup equals a full recompute")
     expect.text(_refresh(conn), "0", "a refresh with nothing new folds nothing")
     expect.text(_matches(conn), _oracle(conn), "and leaves the rollup as it was")
 
@@ -125,7 +125,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     th.join(60)
     expect.num(out.get("folded"), 400, "the paused refresh folded what was there before it began")
     expect.text(_refresh(conn), "220", "the next refresh folds the rows committed during the last one, once")
-    expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
+    expect.text(_matches(conn), _oracle(conn), "and after the refresh that ran beside an insert the rollup equals a full recompute")
 
     # Two refreshes at once.
     _load(conn, 28521, 30020, "2026-02-10 00:00:00+00")
@@ -141,7 +141,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
         t.join(60)
     expect.text(" ".join(str(x) for x in sorted(got)), "0 1500",
                 "two refreshes started together fold the new rows once between them")
-    expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
+    expect.text(_matches(conn), _oracle(conn), "and after two refreshes started together the rollup equals a full recompute")
 
     # Zones.
     for zone, name in (("UTC", "z_utc"), ("America/St_Johns", "z_stjohns")):
@@ -160,7 +160,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     # Cost, on a source of real size.
     _load(conn, 100001, 260000, "2026-03-01 00:00:00+00")
     expect.text(_refresh(conn), "160000", "a refresh folds a bulk append")
-    expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
+    expect.text(_matches(conn), _oracle(conn), "and after the bulk append the rollup equals a full recompute")
     _load(conn, 30021, 30820, "2026-02-11 00:00:00+00")
     with conn.cursor() as cur:
         cur.execute("SELECT pg_stat_force_next_flush()")
@@ -174,7 +174,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.at_least(read, 1, "the refresh after a small append read the source at all")
     expect.at_least(pages - 5 * read if read else 0, 1,
                     "a refresh after a small append reads under a fifth of the source")
-    expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
+    expect.text(_matches(conn), _oracle(conn), "and after the small append the rollup equals a full recompute")
 
     # A rewrite of the source, and rebase.
     def identity():
@@ -199,7 +199,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(_matches(conn), vb, "and leaves the rollup's rows alone")
     _load(conn, 30821, 31420, "2026-02-12 00:00:00+00")
     expect.text(_refresh(conn), "600", "after a rebase the next refresh folds exactly the appended rows")
-    expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
+    expect.text(_matches(conn), _oracle(conn), "and after the rebase the rollup equals a full recompute")
 
     # Phase 1 refuses anything but appends.
     before = _matches(conn)

@@ -86,7 +86,7 @@ check "the rollup table exists with the documented columns" \
 	"bucket,dev,count,sum_v,min_v,max_v,avg_f"
 
 check_num "the first refresh folds every row" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "30000"
-check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check "and after the first refresh the rollup equals a full recompute" "$(matches)" "$(oracle)"
 check_num "a refresh with nothing new folds nothing" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "0"
 check "and leaves the rollup as it was" "$(matches)" "$(oracle)"
 
@@ -112,7 +112,7 @@ check "the paused refresh folded what was there before it began" \
 	"$(sed -n 's/^folded=//p' "$PGC_WORKDIR/paused.out")" "500"
 check_num "the next refresh folds the rows committed during the last one, once" \
 	"$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "300"
-check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check "and after the refresh that ran beside an insert the rollup equals a full recompute" "$(matches)" "$(oracle)"
 
 # Two refreshes at once: the second waits for the first, then has nothing to fold.
 load 35301 37300 "2026-03-15 00:00:00+00"
@@ -123,7 +123,7 @@ done
 wait
 check "two refreshes started together fold the new rows once between them" \
 	"$(cat "$PGC_WORKDIR/both_1.out" "$PGC_WORKDIR/both_2.out" | sort -n | tr '\n' ' ')" "0 2000 "
-check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check "and after two refreshes started together the rollup equals a full recompute" "$(matches)" "$(oracle)"
 
 # The bucket is a pure function of ts: refreshes from different zones agree.
 for z in UTC Asia/Kolkata; do
@@ -143,7 +143,7 @@ check_num "and that is not zero" "$(at_least "$(q "SELECT count(*) FROM r_utc;")
 # group list, the storage id) is itself more than a fifth (measured: 15 blocks).
 load 100001 300000 "2026-04-01 00:00:00+00"
 check_num "a refresh folds a bulk append" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "200000"
-check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check "and after the bulk append the rollup equals a full recompute" "$(matches)" "$(oracle)"
 load 37301 38300 "2026-03-16 00:00:00+00"
 q "SELECT pg_stat_reset();" >/dev/null
 env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
@@ -155,7 +155,7 @@ check_num "the refresh after a small append read the source at all" "$(at_least 
 # Reading nothing also reads under a fifth: the arm requires a read.
 check_num "a refresh after a small append reads under a fifth of the source" \
 	"$( [ -n "$read_blocks" ] && [ "$read_blocks" -ge 1 ] && at_least $((pages - 5 * read_blocks)) 1 || echo "read ${read_blocks:-nothing}")" "1"
-check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check "and after the small append the rollup equals a full recompute" "$(matches)" "$(oracle)"
 
 # A rewrite renumbers every row group (#1294 point 9): the snapshot no longer names
 # the source's groups, so a refresh is refused, and rebase_rollup records the
@@ -179,7 +179,7 @@ check "and leaves the rollup's rows alone" "$(exact "SELECT * FROM r_hourly")" "
 load 38301 39100 "2026-03-17 00:00:00+00"
 check_num "after a rebase the next refresh folds exactly the appended rows" \
 	"$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "800"
-check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+check "and after the rebase the rollup equals a full recompute" "$(matches)" "$(oracle)"
 
 # Phase 1 folds appends only; anything else is refused, and the rollup is untouched.
 before="$(exact "SELECT * FROM r_hourly")"
