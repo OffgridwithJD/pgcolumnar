@@ -3187,6 +3187,145 @@ pgcolumnar_reject_drop_projected_column(AlterTableStmt *stmt)
 	list_free(relations);
 }
 
+/*
+ * A COLLATION CHANGE THAT REWRITES NOTHING (#1327).
+ *
+ * ALTER COLUMN ... TYPE text COLLATE <other> keeps the relfilenode when the type
+ * is unchanged, so no new zone maps are written, and the old ones hold minima
+ * and maxima under the old collation. The reader compares them under the new
+ * one, and pruned rows the new collation orders differently: @jdatcmd measured
+ * min|max B|m where heap said a|m, and WHERE s < 'B' returning nothing.
+ *
+ * Before the statement, each columnar relation it could alter -- the named one
+ * and every inheritor, which is how an ALTER on a partitioned parent reaches a
+ * columnar partition -- has its relfilenode and its columns' collations
+ * recorded from the syscache. Opening the relations here would take a lock the
+ * ALTER then upgrades. After the statement, a relation with the same
+ * relfilenode was not rewritten, and any column whose collation differs has its
+ * ordering forgotten (PgColumnarForgetColumnOrdering). A rewritten relation
+ * wrote new zone maps under the new collation and needs nothing.
+ */
+typedef struct PgColumnarCollationsBefore
+{
+	Oid			relid;
+	Oid			relfilenode;
+	int			natts;
+	Oid		   *collations;		/* by attnum - 1 */
+} PgColumnarCollationsBefore;
+
+static Oid
+pgcolumnar_attcollation(Oid relid, AttrNumber attnum)
+{
+	HeapTuple	tp = SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum));
+	Oid			coll = InvalidOid;
+
+	if (HeapTupleIsValid(tp))
+	{
+		coll = ((Form_pg_attribute) GETSTRUCT(tp))->attcollation;
+		ReleaseSysCache(tp);
+	}
+	return coll;
+}
+
+static List *
+pgcolumnar_collations_before(AlterTableStmt *stmt)
+{
+	List	   *out = NIL;
+	List	   *rels;
+	ListCell   *lc;
+	bool		changesType = false;
+	Oid			relid;
+
+	foreach(lc, stmt->cmds)
+		if (((AlterTableCmd *) lfirst(lc))->subtype == AT_AlterColumnType)
+			changesType = true;
+	if (!changesType || stmt->relation == NULL)
+		return NIL;
+	relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+	if (!OidIsValid(relid))
+		return NIL;
+	rels = find_all_inheritors(relid, NoLock, NULL);
+	foreach(lc, rels)
+	{
+		Oid			r = lfirst_oid(lc);
+		HeapTuple	tp;
+		Form_pg_class cls;
+		PgColumnarCollationsBefore *b;
+		int			a;
+
+		if (!PgColumnarIsColumnarRelation(r))
+			continue;
+		tp = SearchSysCache1(RELOID, ObjectIdGetDatum(r));
+		if (!HeapTupleIsValid(tp))
+			continue;
+		cls = (Form_pg_class) GETSTRUCT(tp);
+		b = palloc0(sizeof(PgColumnarCollationsBefore));
+		b->relid = r;
+		b->relfilenode = cls->relfilenode;
+		b->natts = cls->relnatts;
+		ReleaseSysCache(tp);
+		b->collations = palloc0(sizeof(Oid) * Max(b->natts, 1));
+		for (a = 1; a <= b->natts; a++)
+			b->collations[a - 1] = pgcolumnar_attcollation(r, a);
+		out = lappend(out, b);
+	}
+	return out;
+}
+
+static void
+pgcolumnar_forget_changed_collations(List *before)
+{
+	ListCell   *lc;
+
+	foreach(lc, before)
+	{
+		PgColumnarCollationsBefore *b = (PgColumnarCollationsBefore *) lfirst(lc);
+		HeapTuple	tp;
+		Oid			relfilenode;
+		Relation	rel;
+		uint64		storageId;
+		int			a;
+
+		tp = SearchSysCache1(RELOID, ObjectIdGetDatum(b->relid));
+		if (!HeapTupleIsValid(tp))
+			continue;
+		relfilenode = ((Form_pg_class) GETSTRUCT(tp))->relfilenode;
+		ReleaseSysCache(tp);
+		if (relfilenode != b->relfilenode || !PgColumnarIsColumnarRelation(b->relid))
+			continue;			/* rewritten: its zone maps are new */
+		rel = relation_open(b->relid, AccessShareLock);
+		storageId = PgColumnarStorageId(rel);
+		for (a = 1; a <= Min(b->natts, RelationGetDescr(rel)->natts); a++)
+		{
+			Form_pg_attribute att = TupleDescAttr(RelationGetDescr(rel), a - 1);
+
+			ListCell   *pc;
+
+			if (att->attisdropped || att->attcollation == b->collations[a - 1])
+				continue;
+			PgColumnarForgetColumnOrdering(storageId, a - 1);
+
+			/*
+			 * A projection stores the column in its own storage, with zone maps
+			 * of its own, laid out [rownumber, projcol1..projcolK]: the column at
+			 * position j of the projection's list is column index j + 1.
+			 */
+			foreach(pc, PgColumnarListProjections(storageId))
+			{
+				PgColumnarProjection *proj = (PgColumnarProjection *) lfirst(pc);
+				int			j;
+
+				if (proj->projectionId == 0)
+					continue;
+				for (j = 0; j < proj->columnsLen; j++)
+					if (proj->columns[j] == a)
+						PgColumnarForgetColumnOrdering(proj->projStorageId, j + 1);
+			}
+		}
+		relation_close(rel, AccessShareLock);
+	}
+}
+
 static void
 pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 						 bool readOnlyTree, ProcessUtilityContext context,
@@ -3194,6 +3333,7 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 						 DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
+	List	   *collationsBefore = NIL;
 
 	/*
 	 * Start from empty, but only for the OUTERMOST statement: a statement that
@@ -3211,6 +3351,7 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 
 		pgcolumnar_reject_drop_projected_column(stmt);
 		pgcolumnar_reject_set_am_to_columnar(stmt);
+		collationsBefore = pgcolumnar_collations_before(stmt);
 	}
 
 	PG_TRY();
@@ -3228,6 +3369,9 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	/* #1327: after the statement, so a change that errored leaves nothing */
+	pgcolumnar_forget_changed_collations(collationsBefore);
 
 	/*
 	 * A rewrite loses this relation's declared projections, so re-record them

@@ -629,6 +629,7 @@ extern void PgColumnarInsertExtentRow(uint64 storageId, int columnIndex, bool co
 									  const char *maximum, int maximumLen);
 extern List *PgColumnarReadExtentRows(uint64 storageId, int columnIndex, Snapshot snapshot);
 extern void PgColumnarDeleteExtentRow(ItemPointer tid);
+extern void PgColumnarForgetColumnOrdering(uint64 storageId, int columnIndex);
 extern Oid	PgColumnarStorageRelationOid(uint64 storageId, Snapshot snapshot);
 
 /* the extent's lifecycle: columnar_extent.c */
