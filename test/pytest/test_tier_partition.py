@@ -27,7 +27,6 @@ import time
 import psycopg
 
 BOUND = "FOR VALUES FROM ('2026-03-01 00:00:00+00') TO ('2026-04-01 00:00:00+00')"
-STEPS = ("export", "detach", "drop", "create", "attach")
 
 
 def _one(conn, sql):
@@ -201,7 +200,7 @@ def test_tier_partition_moves_a_partition_exactly_once(pgc_own_db, pgc_cluster, 
                 f"{mar + 1}|{wb + 1}|1", "a write in flight when the move starts is in the exported rows")
 
     # A failure after each step.
-    for step in STEPS:
+    for step in ("export", "detach", "drop", "create", "attach"):
         _build(conn, "f")
         fb = _digest(conn, "f")
         with conn.cursor() as cur:
@@ -247,7 +246,7 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
     mar = 6378
 
     # 1. Isolation.
-    for n, lvl in enumerate(("read committed", "repeatable read", "serializable")):
+    for n, lvl in ((0, "read committed"), (1, "repeatable read"), (2, "serializable")):
         t = f"iso{n}"
         _build(conn, t)
         before = _one(conn, f"SELECT count(*) FROM {t}")
