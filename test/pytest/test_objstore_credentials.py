@@ -153,7 +153,11 @@ def test_object_store_credentials(pgc_cluster, expect):
     if pa is None:
         return
     import psycopg
-    import pyarrow.parquet as pq
+    # Through require_module, as the import guard requires: pyarrow.parquet is a
+    # submodule a bare "import pyarrow" does not load.
+    pq = expect.require_module("pyarrow.parquet", name="pyarrow is required to write the fixture")
+    if pq is None:
+        return
     from pgc_cluster import Cluster, pick_port
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="pgc-creds-"))
