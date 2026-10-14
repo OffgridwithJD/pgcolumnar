@@ -392,6 +392,10 @@ cases = {
     'tu_ts_ns_trunc':(pa.timestamp('ns'), S2000 * 10**9 + 1500),  # 1.5us past the epoch
     'tu_t64_ns_neg': (pa.time64('ns'),    -500),              # narrows to 0us: not midnight
     'tu_ts_ns_neg':  (pa.timestamp('ns'), -1500),             # 1.5us BEFORE the epoch
+    # dates outside PostgreSQL's range, each valid in its own carrier (#1341)
+    'tu_d32_far':    (pa.date32(),        2**31 - 1),         # ~5.88 million years on
+    'tu_d32_past':   (pa.date32(),        -2**31),            # before 4713 BC
+    'tu_d64_far':    (pa.date64(),        2**62),             # milliseconds, far past 5874897 AD
     # a temporal carrier whose tag no other temporal target can hold
     'tu_t64_plain':  (pa.time64('us'),    NOON * 10**6),
 }
@@ -544,6 +548,16 @@ PY
 		"$(tu_value tu_ts_ns_neg timestamp)" "1969-12-31 23:59:59.999998"
 	check "a negative nanosecond time is refused, not narrowed into midnight" \
 		"$(tu_import_state tu_t64_ns_neg time)" "22008"
+
+	# A date outside PostgreSQL's range, in either carrier and at either end (#1341).
+	# Without the range check the day count is cast to DateADT and stored, so the
+	# import succeeds with a date nothing can read back as the one in the file.
+	check "a date32 past PostgreSQL's last date is refused" \
+		"$(tu_import_state tu_d32_far date)" "22008"
+	check "a date32 before PostgreSQL's first date is refused" \
+		"$(tu_import_state tu_d32_past date)" "22008"
+	check "a date64 past PostgreSQL's last date is refused" \
+		"$(tu_import_state tu_d64_far date)" "22008"
 
 	# ---- the file's declared type must match the target's -------------------
 	#

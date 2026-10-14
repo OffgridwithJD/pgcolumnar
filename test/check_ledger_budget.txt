@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 245
+suites_not_covered 244
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -1901,4 +1901,17 @@ suites_not_covered 245
 #     never         1801 + 20 = 1821
 #     dated          560 +  4 =  564
 #     1821 + 564 == 2385
-checks_never_observed_red 1821
+#
+# #1341, arrow_import seeded, with three date-range arms (OffgridwithJD): 1821 -> 1893,
+# and suites_not_covered 245 -> 244. The suite had no rows. It enters with all 75
+# checks from five-major runs (75/75 on each of 15-19). The three new arms are dated
+# by the date decode without its range check: a date32 past PostgreSQL's last date,
+# one before its first, and a date64 past its last each imported with 00000. The
+# other 72 arrive never: seeding a suite moves the census up by its undated rows,
+# and the coverage ceiling down by one.
+#
+#     ledger rows   2385 + 75 = 2460
+#     never         1821 + 72 = 1893
+#     dated          564 +  3 =  567
+#     1893 + 567 == 2460
+checks_never_observed_red 1893
