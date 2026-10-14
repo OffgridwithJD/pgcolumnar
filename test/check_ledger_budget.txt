@@ -1942,4 +1942,17 @@ suites_not_covered 244
 #     never         1895 + 1 - 1 = 1895
 #     dated          569 + 2     =  571
 #     1895 + 571 == 2466
-checks_never_observed_red 1895
+#
+# #1339, undated premises (jdatcmd): 1895 -> 1894. Six `premise:` checks a mutation
+# reddens become arms (#1236). Four of them are ledgered and renamed with their
+# history: catalog_delete_index's "the phase {0,A,B} compaction retired the emptied
+# groups" (red with compact retiring nothing, not merged: that log also reddens two
+# stability premises the audit did not flag), and native_fetch_coalesce's "the wide
+# fetch returns the projected values", now dated by every column of a coalesced fetch
+# copied from the start of the span, red on each of 15-19 (7/7 green). No row added.
+#
+#     ledger rows   2466     = 2466
+#     never         1895 - 1 = 1894
+#     dated          571 + 1 =  572
+#     1894 + 572 == 2466
+checks_never_observed_red 1894

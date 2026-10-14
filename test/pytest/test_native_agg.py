@@ -77,7 +77,7 @@ def test_min_max_over_timestamptz_read_no_data(pgc_conn, expect):
         cur.execute("EXPLAIN SELECT max(at) FROM readings")
         plan = "\n".join(r[0] for r in cur.fetchall())
     expect.text("yes" if "Columnar Vectorized Aggregates" in plan else "no", "yes",
-                "premise: max(ts) over timestamptz plans the metadata agg node")
+                "max(ts) over timestamptz plans the metadata agg node")
 
     decode = _blocks(pgc_conn, "readings", "SELECT max(at + interval '0 s') FROM readings")
     mx = _blocks(pgc_conn, "readings", "SELECT max(at) FROM readings")
@@ -111,7 +111,7 @@ def test_min_max_over_timestamptz_read_no_data(pgc_conn, expect):
     n, nh = (_one(pgc_conn, "SELECT count(*) FROM readings"),
              _one(pgc_conn, "SELECT count(*) FROM readings_heap"))
     expect.text(f"{n < ROWS}|{n}", f"True|{nh}",
-                "premise: the deletes removed rows at both ends, the same rows from each")
+                "the deletes removed rows at both ends, the same rows from each")
     got, want = both("SELECT max(at) FROM {t}")
     expect.text(got, want, "max(timestamptz) parity after deleting the newest rows")
     got, want = both("SELECT min(at) FROM {t}")

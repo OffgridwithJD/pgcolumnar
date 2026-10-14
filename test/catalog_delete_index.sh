@@ -264,7 +264,7 @@ phase() {
 
 	# DERIVED FROM `groups`, NOT ASSUMED EVEN. make_target empties every other
 	# group, so an odd count retires the larger half.
-	check_num "premise: the phase $ph compaction retired the emptied groups" \
+	check_num "the phase $ph compaction retired the emptied groups" \
 		"$(( groups - $(groups_of "$t_default") ))" "$retired"
 	check_num "premise: the phase $ph compaction kept every surviving row" \
 		"$(q "SELECT count(*) FROM $t_default;")" "$surviving"

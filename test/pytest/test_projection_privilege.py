@@ -189,7 +189,7 @@ def test_the_premises_the_fixture_is_what_the_suite_assumes(pgc_cluster, pgc_con
         for f in FUNCS:
             cur.execute(f"SELECT count(*) FROM pgcolumnar.{f}('prj_secret','p1')")
             expect.num(cur.fetchone()[0], ROWS,
-                       "premise: the owner reads the projection, and gets rows" if f == "read_projection"
+                       "the owner reads the projection, and gets rows" if f == "read_projection"
                        else "premise: the owner reconstructs, and gets rows")
         cur.execute(
             "SELECT pgcolumnar.reconstruct_via_projection('prj_secret','p1') "
