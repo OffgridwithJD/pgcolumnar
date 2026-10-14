@@ -647,4 +647,6 @@ guard_tests 433
 #
 # cluster_tests 542 -> 543 for test_fdw_plan_privilege.py, one test, the twin of
 # test/fdw_plan_privilege.sh, by collection over the cluster files on this branch.
-cluster_tests 543
+# cluster_tests 543 -> 549 for #1341's test_arrow_import.py, the twin of arrow_import.sh:
+# six tests, by collection over the cluster files on this tree.
+cluster_tests 549
