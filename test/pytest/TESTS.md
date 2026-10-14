@@ -152,6 +152,7 @@ behaviour, the source of that number is named.
 - [104. test_build_needs_pg_config.py: a build with no pg_config refuses, it does not wait on stdin](#104-test_build_needs_pg_configpy-a-build-with-no-pg_config-refuses-it-does-not-wait-on-stdin)
 - [105. test_import_export_privilege.py: import and export check the table's privilege, serial and parallel](#105-test_import_export_privilegepy-import-and-export-check-the-tables-privilege-serial-and-parallel)
 - [106. test_every_suite_job_installs_the_extensions.py: every job that runs the suites installs the extension packages](#106-test_every_suite_job_installs_the_extensionspy-every-job-that-runs-the-suites-installs-the-extension-packages)
+- [107. test_fdw_plan_privilege.py: planning a foreign table reads no server file for a role the scan would refuse](#107-test_fdw_plan_privilegepy-planning-a-foreign-table-reads-no-server-file-for-a-role-the-scan-would-refuse)
 
 ## 1. How to read a test in here
 
@@ -6848,3 +6849,13 @@ Needs no cluster and no driver.
 | `test_the_detector_names_what_it_finds_and_what_it_cannot_read` | on workflows written to fail, the detector names the job that lacks a package, a workflow it cannot read, and a workflow with no suite job |
 | `test_the_suite_jobs_are_the_five_known` | the suite-running jobs are exactly `ci.yml`'s `pytest-cluster` and `suites`, and `nightly.yml`'s `coverage`, `pytest-cluster` and `suites`, so a rename is red |
 | `test_every_suite_job_installs_every_extension_package` | no suite job lacks a package another installs |
+
+## 107. test_fdw_plan_privilege.py: planning a foreign table reads no server file for a role the scan would refuse
+
+The pytest twin of `test/fdw_plan_privilege.sh`. A planner estimate is visible through EXPLAIN, so a wrapper that reads its file at plan time for anyone tells a role without `pg_read_server_files` how many rows a server-side table holds. If the path doesn't exist, the planning error tells it that instead. The Iceberg wrapper's planner read `metadata_path` for every role: the unprivileged planner saw the true row count (5), and a missing path failed planning with `58P01`. Its planner now reads only for a role the scan would admit, as the Parquet wrapper's has since #330. That gate had no test either.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_fdw_planning_reads_no_server_file_for_an_unprivileged_role` | a role without `pg_read_server_files` gets the flat estimate from both wrappers and plans a missing Iceberg path the same as a real one, while the scan still refuses it (42501); a privileged role gets the manifest count and the size estimate (controls) |

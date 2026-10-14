@@ -401,6 +401,14 @@ true until the next version shipped.
 
 ### Fixed
 
+- **The Iceberg wrapper no longer reads server files while planning for a role the scan
+  would refuse.** `EXPLAIN` on an Iceberg foreign table read its `metadata_path` for any
+  role holding SELECT on it. That showed a role without `pg_read_server_files` the
+  table's row count, and a `metadata_path` that did not exist failed planning with
+  `58P01`, which probed whether a server path exists. The planner now reads the metadata
+  only for a role the scan would admit, and gives everyone else the flat estimate, as the
+  Parquet wrapper has since #330. `test/fdw_plan_privilege.sh` and
+  `test_fdw_plan_privilege.py` pin both wrappers' gates.
 - Changing a text column's collation without a rewrite no longer gives wrong
   answers (#1327). `ALTER COLUMN ... TYPE text COLLATE <other>` keeps the
   table's files, so the zone maps kept minima and maxima ordered under the old

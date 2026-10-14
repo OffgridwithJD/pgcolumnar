@@ -644,4 +644,7 @@ guard_tests 433
 # in test_catalog_plan_index.py, by collection over the cluster files on this tree.
 # cluster_tests 541 -> 542 for #1394's test_a_delete_whose_qual_deletes_another_row_matches_heap
 # in test_native_delete_visibility_paths.py, by collection over the cluster files on this tree.
-cluster_tests 542
+#
+# cluster_tests 542 -> 543 for test_fdw_plan_privilege.py, one test, the twin of
+# test/fdw_plan_privilege.sh, by collection over the cluster files on this branch.
+cluster_tests 543
