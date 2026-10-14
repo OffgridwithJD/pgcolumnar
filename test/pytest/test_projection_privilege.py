@@ -190,18 +190,18 @@ def test_the_premises_the_fixture_is_what_the_suite_assumes(pgc_cluster, pgc_con
             cur.execute(f"SELECT count(*) FROM pgcolumnar.{f}('prj_secret','p1')")
             expect.num(cur.fetchone()[0], ROWS,
                        "the owner reads the projection, and gets rows" if f == "read_projection"
-                       else "premise: the owner reconstructs, and gets rows")
+                       else "the owner reconstructs, and gets rows")
         cur.execute(
             "SELECT pgcolumnar.reconstruct_via_projection('prj_secret','p1') "
             "LIKE '%note-%' LIMIT 1"
         )
         expect.text(str(cur.fetchone()[0]), "True",
-                    "premise: reconstruct really does return the NON-COVERED column")
+                    "reconstruct really does return the NON-COVERED column")
         cur.execute(
             "SELECT pgcolumnar.read_projection('prj_secret','p1') LIKE '%note-%' LIMIT 1"
         )
         expect.text(str(cur.fetchone()[0]), "False",
-                    "premise: and read_projection does NOT, so the two differ as the issue says")
+                    "and read_projection does NOT, so the two differ as the issue says")
         cur.execute(
             "SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s) AND rolsuper", (list(ROLES),)
         )
@@ -357,7 +357,7 @@ def test_a_policy_restricted_caller_is_refused(pgc_cluster, pgc_conn, expect, fu
     `PgColumnarRequireNoRowSecurity` raises ERRCODE_FEATURE_NOT_SUPPORTED, so this arm
     asserts 0A000 where the shell suite greps `^ERROR:.*row-level security`. The codes are
     from different SQLSTATE CLASSES -- 0A and 42 -- so this cannot be confused with either
-    ACL refusal by any amount of rewording, and the premise below shows the policy really
+    ACL refusal by any amount of rewording, and the check below shows the policy really
     took effect rather than the call having broken for some other reason.
     """
     with pgc_conn.cursor() as cur:
@@ -368,7 +368,7 @@ def test_a_policy_restricted_caller_is_refused(pgc_cluster, pgc_conn, expect, fu
 
     rows, err = _as(pgc_cluster, SEL, "SELECT count(*) FROM prj_secret", schema)
     assert err is None, f"{SEL} could not read the table under the policy: {err}"
-    expect.num(rows[0][0], 1, "premise: the policy is in force for ordinary SQL")
+    expect.num(rows[0][0], 1, "the policy is in force for ordinary SQL")
 
     _, err = _as(pgc_cluster, SEL,
                  f"SELECT count(*) FROM pgcolumnar.{func}('prj_secret','p1')", schema)

@@ -122,16 +122,16 @@ state_as() {  # state_as <role> <sql>
 # function that does nothing.
 check_num "the owner reads the projection, and gets rows" \
 	"$(q "SELECT count(*) FROM pgcolumnar.read_projection('secret','p1');")" "$ROWS"
-check_num "premise: the owner reconstructs, and gets rows" \
+check_num "the owner reconstructs, and gets rows" \
 	"$(q "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('secret','p1');")" "$ROWS"
 # Both functions RETURN SETOF text: one row is a single pipe-joined string, not
 # a record. A column definition list is rejected outright, which is how an
 # earlier probe of these functions produced five arms that all looked like
 # refusals and were actually call errors. Match the text.
-check "premise: reconstruct really does return the NON-COVERED column" \
+check "reconstruct really does return the NON-COVERED column" \
 	"$(q "SELECT pgcolumnar.reconstruct_via_projection('secret','p1') LIKE '%note-%' LIMIT 1;")" \
 	"t"
-check "premise: and read_projection does NOT, so the two differ as the issue says" \
+check "and read_projection does NOT, so the two differ as the issue says" \
 	"$(q "SELECT pgcolumnar.read_projection('secret','p1') LIKE '%note-%' LIMIT 1;")" \
 	"f"
 check "premise: the test roles are not superusers" \
@@ -236,7 +236,7 @@ check "and still reconstructs" \
 psql_run "ALTER TABLE secret ENABLE ROW LEVEL SECURITY;"
 psql_run "CREATE POLICY p_one ON secret FOR SELECT TO t_prjsel USING (id = 1);"
 
-check_num "premise: the policy is in force for ordinary SQL" \
+check_num "the policy is in force for ordinary SQL" \
 	"$(as t_prjsel 'SELECT count(*) FROM secret;' | head -1)" "1"
 check "read_projection now refuses a policy-restricted caller (#563)" \
 	"$(count_as t_prjsel read_projection)" "refused"
