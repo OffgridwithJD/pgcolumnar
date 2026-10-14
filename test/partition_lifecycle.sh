@@ -262,15 +262,18 @@ as_role() {	# as_role ROLE SQL -> the single value SQL returns as ROLE, or the S
 		*) printf '%s\n' "$out" | tail -1 ;;
 	esac
 }
-q "CREATE TABLE pv (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts); ALTER TABLE pv OWNER TO pl_own;" >/dev/null
+# The owner's control has a parent of its own (pw2), so a refusal that let the peer
+# through cannot make the control fail for the peer's reason.
+q "CREATE TABLE pv (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts); ALTER TABLE pv OWNER TO pl_own;
+   CREATE TABLE pw2 (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts); ALTER TABLE pw2 OWNER TO pl_own;" >/dev/null
 check "premise: pl_own owns the parent, and neither role is a superuser" \
-	"$(q "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'pv'::regclass;")|$(q "SELECT count(*) FROM pg_roles WHERE rolname IN ('pl_own', 'pl_peer') AND rolsuper;")" \
+	"$(q "SELECT string_agg(DISTINCT pg_get_userbyid(relowner), ',') FROM pg_class WHERE oid IN ('pv'::regclass, 'pw2'::regclass);")|$(q "SELECT count(*) FROM pg_roles WHERE rolname IN ('pl_own', 'pl_peer') AND rolsuper;")" \
 	"pl_own|0"
 check "premise: pl_peer can open a session" "$(as_role pl_peer "SELECT 1")" "1"
 check "a role that does not own the parent is refused by its own privileges (42501), and creates nothing" \
 	"$(as_role pl_peer "SELECT pgcolumnar.partition_create_ahead('pv', '1 day', 2)")|$(kids pv)" "42501|0"
 check "a non-superuser owner creates partitions ahead on its own table" \
-	"$(as_role pl_own "SELECT pgcolumnar.partition_create_ahead('pv', '1 day', 2)")|$(kids pv)" "3|3"
+	"$(as_role pl_own "SELECT pgcolumnar.partition_create_ahead('pw2', '1 day', 2)")|$(kids pw2)" "3|3"
 
 # ==== the drop half: partition_drop_plan (#1297) ================================
 #

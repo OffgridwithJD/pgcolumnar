@@ -402,7 +402,8 @@ fi
 # ---- the caller's own privileges (#1341) -------------------------------------
 #
 # tier_partition is not SECURITY DEFINER: every step runs as the caller, so the
-# owner's ALTER TABLE ... DETACH is what stops a role that does not own the table.
+# owner-only steps (its LOCK ... IN SHARE MODE first) stop a role that does not own
+# the table.
 # Made SECURITY DEFINER, it would run as the extension's owner and let any caller
 # detach, drop and replace a partition it does not own. Two roles, each holding
 # every other privilege the call needs (the server-file role for the export, USAGE
@@ -420,12 +421,17 @@ sqlstate_as() {	# sqlstate_as ROLE SQL -> the SQLSTATE SQL fails with as ROLE, o
 	[ -z "$out" ] && { echo ok; return; }
 	echo "$out" | sed -n 's/^\(ERROR\|FATAL\): *\([0-9A-Z]\{5\}\).*/\2/p' | head -1
 }
-build po
-psql_run "ALTER TABLE po OWNER TO tier_own; ALTER TABLE po_jan OWNER TO tier_own;
-          ALTER TABLE po_feb OWNER TO tier_own; GRANT SELECT ON po, po_jan TO tier_peer;"
+# The owner's control has a table of its own (pw), so a refusal that let the peer
+# through cannot make the control fail for the peer's reason.
+for t in po pw; do
+	build $t
+	psql_run "ALTER TABLE $t OWNER TO tier_own; ALTER TABLE ${t}_jan OWNER TO tier_own;
+	          ALTER TABLE ${t}_feb OWNER TO tier_own;"
+done
+psql_run "GRANT SELECT ON po, po_jan TO tier_peer;"
 pb="$(digest po)"
 check "premise: tier_own owns the parent and its partitions, and neither role is a superuser" \
-	"$(q "SELECT string_agg(DISTINCT pg_get_userbyid(relowner), ',') FROM pg_class WHERE relname IN ('po', 'po_jan', 'po_feb');")|$(q "SELECT count(*) FROM pg_roles WHERE rolname IN ('tier_own', 'tier_peer') AND rolsuper;")" \
+	"$(q "SELECT string_agg(DISTINCT pg_get_userbyid(relowner), ',') FROM pg_class WHERE relname IN ('po', 'po_jan', 'po_feb', 'pw', 'pw_jan', 'pw_feb');")|$(q "SELECT count(*) FROM pg_roles WHERE rolname IN ('tier_own', 'tier_peer') AND rolsuper;")" \
 	"tier_own|0"
 check "premise: tier_peer can open a session and read the partition" \
 	"$(sqlstate_as tier_peer "SELECT count(*) FROM po_jan")" "ok"
@@ -435,12 +441,12 @@ check "and the refused call leaves the partition local and attached, every row o
 	"$(digest po)|$(jan_shape po)" "$pb|r:pgcolumnar:$JAN_BOUND"
 check_num "with no foreign table behind it" \
 	"$(q "SELECT count(*) FROM pg_foreign_table t JOIN pg_class c ON c.oid = t.ftrelid WHERE c.relname LIKE 'po\\_%';")" "0"
-# Measured, not asserted: the export runs before the DETACH that refuses, so the
-# file is written first. A role holding the server-file role and SELECT can write
-# that file with export_parquet directly, so this grants nothing new.
-echo "-- the refused call's export file: $([ -e "$W/po_peer.parquet" ] && echo written || echo absent)"
+# The first statement to need more than SELECT is the LOCK ... IN SHARE MODE ahead
+# of the export, so the refusal comes before any file is written (measured on 15-19).
+check "and the refused call wrote no export file" \
+	"$([ -e "$W/po_peer.parquet" ] && echo written || echo absent)" "absent"
 check "a non-superuser owner tiers its own partition" \
-	"$(sqlstate_as tier_own "SELECT pgcolumnar.tier_partition('po_jan', 'tier_pq', '$W/po_own.parquet')")|$(jan_shape po)" \
+	"$(sqlstate_as tier_own "SELECT pgcolumnar.tier_partition('pw_jan', 'tier_pq', '$W/pw_own.parquet')")|$(jan_shape pw)" \
 	"ok|f:-:$JAN_BOUND"
 
 # ---- a failure after each step ----------------------------------------------

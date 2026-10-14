@@ -611,8 +611,11 @@ def test_partition_create_ahead_runs_on_the_callers_own_privileges(pgc_conn, pgc
                         "EXCEPTION WHEN duplicate_object THEN NULL; END $$")
             cur.execute(f'GRANT USAGE, CREATE ON SCHEMA "{schema}" TO {r}')
             cur.execute(f"GRANT USAGE ON SCHEMA pgcolumnar TO {r}")
-        cur.execute("CREATE TABLE pv (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts)")
-        cur.execute("ALTER TABLE pv OWNER TO pl_own_py")
+        # The owner's control has a parent of its own (pw2), so a refusal that let the
+        # peer through cannot make the control fail for the peer's reason.
+        for t in ("pv", "pw2"):
+            cur.execute(f"CREATE TABLE {t} (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts)")
+            cur.execute(f"ALTER TABLE {t} OWNER TO pl_own_py")
 
     def as_role(role, sql):
         try:
@@ -624,12 +627,14 @@ def test_partition_create_ahead_runs_on_the_callers_own_privileges(pgc_conn, pgc
             return e.sqlstate or "?"
 
     ahead_pv = "SELECT pgcolumnar.partition_create_ahead('pv', '1 day', 2)"
-    owner = _one(conn, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'pv'::regclass")
+    owner = _one(conn, "SELECT string_agg(DISTINCT pg_get_userbyid(relowner), ',') FROM pg_class"
+                       " WHERE oid IN ('pv'::regclass, 'pw2'::regclass)")
     supers = _one(conn, "SELECT count(*) FROM pg_roles WHERE rolname IN ('pl_own_py', 'pl_peer_py') AND rolsuper")
     expect.text(f"{owner}|{supers}", "pl_own_py|0",
                 "premise: pl_own owns the parent, and neither role is a superuser")
     expect.text(as_role("pl_peer_py", "SELECT 1"), "1", "premise: pl_peer can open a session")
     expect.text(f"{as_role('pl_peer_py', ahead_pv)}|{_kids(conn, 'pv')}",
                 "42501|0", "a role that does not own the parent is refused by its own privileges (42501), and creates nothing")
-    expect.text(f"{as_role('pl_own_py', ahead_pv)}|{_kids(conn, 'pv')}",
+    ahead_pw2 = "SELECT pgcolumnar.partition_create_ahead('pw2', '1 day', 2)"
+    expect.text(f"{as_role('pl_own_py', ahead_pw2)}|{_kids(conn, 'pw2')}",
                 "3|3", "a non-superuser owner creates partitions ahead on its own table")

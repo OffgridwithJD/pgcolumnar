@@ -549,10 +549,14 @@ def test_tier_partition_runs_on_the_callers_own_privileges(pgc_own_db, pgc_clust
             cur.execute(f"GRANT USAGE ON FOREIGN SERVER tq TO {r}")
             cur.execute(f"GRANT USAGE, CREATE ON SCHEMA public TO {r}")
             cur.execute(f"GRANT USAGE ON SCHEMA pgcolumnar TO {r}")
-    _build(conn, "po")
+    # The owner's control has a table of its own (pw), so a refusal that let the peer
+    # through cannot make the control fail for the peer's reason.
+    for t in ("po", "pw"):
+        _build(conn, t)
+        with conn.cursor() as cur:
+            for r in (t, f"{t}_mar", f"{t}_apr"):
+                cur.execute(f"ALTER TABLE {r} OWNER TO tier_own_py")
     with conn.cursor() as cur:
-        for t in ("po", "po_mar", "po_apr"):
-            cur.execute(f"ALTER TABLE {t} OWNER TO tier_own_py")
         cur.execute("GRANT SELECT ON po, po_mar TO tier_peer_py")
     before = _digest(conn, "po")
 
@@ -567,7 +571,7 @@ def test_tier_partition_runs_on_the_callers_own_privileges(pgc_own_db, pgc_clust
             return e.sqlstate or "?"
 
     owners = _one(conn, "SELECT string_agg(DISTINCT pg_get_userbyid(relowner), ',') FROM pg_class"
-                        " WHERE relname IN ('po', 'po_mar', 'po_apr')")
+                        " WHERE relname IN ('po', 'po_mar', 'po_apr', 'pw', 'pw_mar', 'pw_apr')")
     supers = _one(conn, "SELECT count(*) FROM pg_roles WHERE rolname IN ('tier_own_py', 'tier_peer_py') AND rolsuper")
     expect.text(f"{owners}|{supers}", "tier_own_py|0",
                 "premise: tier_own owns the parent and its partitions, and neither role is a superuser")
@@ -580,7 +584,9 @@ def test_tier_partition_runs_on_the_callers_own_privileges(pgc_own_db, pgc_clust
                 "and the refused call leaves the partition local and attached, every row once")
     expect.num(_one(conn, "SELECT count(*) FROM pg_foreign_table t JOIN pg_class c ON c.oid = t.ftrelid"
                           " WHERE c.relname LIKE 'po\\_%'"), 0, "with no foreign table behind it")
-    print(f"-- the refused call's export file: {'written' if peer_path.exists() else 'absent'}")
-    expect.text(as_role("tier_own_py", f"SELECT pgcolumnar.tier_partition('po_mar', 'tq', '{server_dir / 'po_own.parquet'}')")
-                + f"|{_mar_shape(conn, 'po')}", f"ok|f:-:{BOUND}",
+    # The LOCK ... IN SHARE MODE ahead of the export is the first statement to need
+    # more than SELECT, so the refusal comes before any file is written.
+    expect.text("written" if peer_path.exists() else "absent", "absent", "and the refused call wrote no export file")
+    expect.text(as_role("tier_own_py", f"SELECT pgcolumnar.tier_partition('pw_mar', 'tq', '{server_dir / 'pw_own.parquet'}')")
+                + f"|{_mar_shape(conn, 'pw')}", f"ok|f:-:{BOUND}",
                 "a non-superuser owner tiers its own partition")
