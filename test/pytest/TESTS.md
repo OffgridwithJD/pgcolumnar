@@ -6677,6 +6677,7 @@ Written red first: on main the fixture raises `unrecognized configuration parame
 | `test_a_failing_expire_does_not_undo_the_compaction` | `expire` on a table whose retention column was dropped fails with `42703`, and the compaction due on that table still lands |
 | `test_the_daemon_yields_the_lock_it_holds_inside_expire` | the worker holds ShareUpdateExclusiveLock inside `expire`; a session's ACCESS EXCLUSIVE is granted within 8 s of a 30 s hold, and the log shows the cancel |
 | `test_a_table_dropped_mid_pass_is_skipped_and_the_pass_goes_on` | while the worker holds `ex_hold`, `ex_gone` is dropped; after the cancel the same pass logs `ex_gone` as skipped and still expires `ex_after` |
+| `test_the_daemon_cuts_a_date_retention_at_its_databases_time_zone` | one row group per day: the first surviving day is the daemon's cutoff in the server's TimeZone, then in a changed one after a reload, and in a database-level TimeZone, which overrides the server's; two zones 25 hours apart, read before and after the passes so a midnight between cannot flake it |
 
 ## 97. test_rollup.py: incremental rollups fold appended row groups, recompute changed ones, and equal a full recompute
 
