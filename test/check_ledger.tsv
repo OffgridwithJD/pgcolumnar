@@ -2937,12 +2937,15 @@ rollup	rollup	each row group's TID range holds exactly that group's rows	15;16;1
 rollup	rollup	expire retired the group in bucket D alone and kept the one that shares it	15;16;17;18;19	2026-10-14	expire retires nothing
 rollup	rollup	expire retired the group the delete thinned	15;16;17;18;19	2026-10-14	expire reports 0 whatever it retired;expire retires nothing
 rollup	rollup	expire retired the old row groups	15;16;17;18;19	2026-10-14	expire reports 0 whatever it retired;expire retires nothing
+rollup	rollup	min and max over a C column and an en_US column keep each column's own order across a refresh	15;16;17;18;19	2026-10-14	the rollup fold of min and max compares in the partials' default collation
 rollup	rollup	nor its retired groups through rollup_source_retired (42501)	15;16;17;18;19	2026-10-14	rollup_source_retired without its require_caller_select guard
 rollup	rollup	pgcolumnar.vacuum gave the source's row groups new identities	15;16;17;18;19	2026-10-14	pgcolumnar.vacuum rewrites nothing
 rollup	rollup	premise: and the fixture has NULL-key and NULL-bucket groups	15;16;17;18;19	never	-
 rollup	rollup	premise: the owner's rollup has group rows another role could reach	15;16;17;18;19	never	-
 rollup	rollup	premise: the rollup functions exist	15;16;17;18;19	never	-
+rollup	rollup	premise: the second refresh folds new rows into the existing bucket	15;16;17;18;19	never	-
 rollup	rollup	premise: the source holds every row	15;16;17;18;19	never	-
+rollup	rollup	premise: the two collations disagree on these rows, so the arm can tell them apart	15;16;17;18;19	never	-
 rollup	rollup	rebase_rollup of a table that is not a rollup is refused (42704)	15;16;17;18;19	2026-10-14	rebase_rollup without its not-a-rollup check
 rollup	rollup	rebase_rollup records the source's current row groups	15;16;17;18;19	2026-10-13	rebase_rollup returning 0
 rollup	rollup	refreshes from sessions in different time zones build the same rollup	15;16;17;18;19	2026-10-13	refresh_rollup bucketing with date_trunc, which follows the session's zone

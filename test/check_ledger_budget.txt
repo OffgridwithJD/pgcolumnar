@@ -2695,4 +2695,15 @@ suites_not_covered 224
 #     never         2532 - 5 = 2527
 #     dated          815 + 5 =  820
 #     2527 + 820 == 3347
-checks_never_observed_red 2527
+#
+# #1341, a rollup's min and max keep each source column's collation (OffgridwithJD):
+# 2527 -> 2529. Three new rollup checks. The arm is dated by the fold comparing in
+# the partials' default collation (on an en_US database the C column's min became
+# a1 where the recompute gives B1). Its two premises arrive never. Five-major runs
+# on the files merged with #1359: rollup 85/85 on 15-19.
+#
+#     ledger rows   3347 + 3 = 3350
+#     never         2527 + 2 = 2529
+#     dated          820 + 1 = 821
+#     2529 + 821 == 3350
+checks_never_observed_red 2529
