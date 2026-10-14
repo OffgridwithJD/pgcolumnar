@@ -55,12 +55,21 @@ pg_restart_env() {
 	echo "FATAL: cluster did not come back after env restart"; exit 1
 }
 
-sqlstate_of() {  # sqlstate_of <sql> [role]
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "${2:-postgres}" \
-		-d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+# sqlstate_of <sql> [role] -> the SQLSTATE the statement fails with; "ok" only when
+# psql ran it and exited 0; "noconnect" when there was no session to run it in. Success
+# is positive evidence (#1400 review): an empty capture, which a session that never
+# connected also gives, is never read as success.
+sqlstate_of() {
+	local out rc st
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "${2:-postgres}" \
+		-d "$PGC_DB" -qtA -v ON_ERROR_STOP=1 2>&1 <<SQLEOF
 \\set VERBOSITY sqlstate
 $1;
 SQLEOF
+)"
+	rc=$?
+	st="$(sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1)"
+	if [ -n "$st" ]; then echo "$st"; elif [ "$rc" = 0 ]; then echo ok; else echo noconnect; fi
 }
 q_as() {  # q_as <role> <sql>
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" \
@@ -110,10 +119,9 @@ psql_run "CREATE SERVER csrv FOREIGN DATA WRAPPER pgcolumnar_parquet
           OPTIONS (endpoint 'http://127.0.0.1:$S3_PORT', region '$REGION');"
 check "placement: endpoint and region on the SERVER are accepted" \
 	"$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'csrv'")" "1"
-# "ok", not an empty SQLSTATE: an empty capture (a failed session) must not pass.
 check "placement: a credential on a USER MAPPING is accepted" \
-	"$(st="$(sqlstate_of "CREATE USER MAPPING FOR postgres SERVER csrv
-	   OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET')")"; echo "${st:-ok}")" "ok"
+	"$(sqlstate_of "CREATE USER MAPPING FOR postgres SERVER csrv
+	   OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET')")" "ok"
 check "placement: endpoint on a USER MAPPING is HV00D" \
 	"$(sqlstate_of "CREATE USER MAPPING FOR cred_alice SERVER csrv OPTIONS (endpoint 'x')")" "HV00D"
 
@@ -126,7 +134,7 @@ psql_run "CREATE USER MAPPING FOR cred_bob SERVER csrv
 check "placement: a non-superuser cannot set credentials_required false (42501)" \
 	"$(sqlstate_of "ALTER USER MAPPING FOR cred_alice SERVER csrv OPTIONS (ADD credentials_required 'false')" cred_alice)" "42501"
 check "placement: a superuser can (for carol, used below)" \
-	"$(st="$(sqlstate_of "CREATE USER MAPPING FOR cred_carol SERVER csrv OPTIONS (credentials_required 'false')")"; echo "${st:-ok}")" "ok"
+	"$(sqlstate_of "CREATE USER MAPPING FOR cred_carol SERVER csrv OPTIONS (credentials_required 'false')")" "ok"
 
 # ---- tables -----------------------------------------------------------------
 psql_run "CREATE FOREIGN TABLE flocal ($COLDEFS) SERVER csrv OPTIONS (path '$PGC_WORKDIR/$BUCKET/fixture.parquet');"
