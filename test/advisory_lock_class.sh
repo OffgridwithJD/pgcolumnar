@@ -212,20 +212,25 @@ check "a duplicate key is still rejected" \
 # so it is fixed at server start. Neither was set or read by any test.
 psql_run "CREATE TABLE rl (id int, v int) USING pgcolumnar;"
 psql_run "INSERT INTO rl SELECT g, g FROM generate_series(1, 100) g;"
-# row_locks_while_updating SETTING -> "<class-104 locks>|<holder's UPDATE running>", read
-# in one query once the holder's UPDATE is running. WAITED FOR, NOT SLEPT ON (#1368
-# review): read after a fixed sleep, a holder that had not reached its UPDATE yet made
-# the off arm read 0 on a build that ignores the setting, because nothing was locked.
-# The second field proves the UPDATE was running when the first was read.
+# row_locks_while_updating SETTING -> "<class-104 locks>|<holder past its UPDATE>", read
+# in one query once the holder's UPDATE has FINISHED. WAITED FOR, NOT SLEPT ON (#1368
+# review), and waited for on the right event: the holder names itself in
+# application_name after its UPDATE returns, and the poll waits for that name. Waiting
+# for its RowExclusiveLock on rl was not enough, because the UPDATE takes that at
+# executor start, before it reaches row 7 and takes the class-104 lock; a poll landing
+# between the two read "none|1" on CI (main f601281, PG 17 and PG 18). The CTE sleep
+# ahead of the row keeps that window open on every run, so waiting on the early event
+# fails every time rather than now and then.
 row_locks_while_updating() {
+	local tag="rl_updated_$1"
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
-		-c "BEGIN; SET LOCAL pgcolumnar.enable_row_update_lock = $1; UPDATE rl SET v = v + 1 WHERE id = 7; SELECT pg_sleep(3); COMMIT;" \
+		-c "BEGIN; SET LOCAL pgcolumnar.enable_row_update_lock = $1; WITH d AS MATERIALIZED (SELECT pg_sleep(1)) UPDATE rl SET v = v + 1 FROM d WHERE id = 7; SET application_name = '$tag'; SELECT pg_sleep(3); COMMIT;" \
 		>/dev/null 2>&1 &
 	local holder=$! got="" i
 	for i in $(seq 1 100); do
-		got="$(q "SELECT count(*) FILTER (WHERE locktype = 'advisory' AND objsubid = 104) || '|' ||
-		                 count(*) FILTER (WHERE locktype = 'relation' AND relation = 'rl'::regclass AND mode = 'RowExclusiveLock')
-		            FROM pg_locks WHERE pid <> pg_backend_pid()")"
+		got="$(q "SELECT (SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 104
+		                    AND pid <> pg_backend_pid()) || '|' ||
+		                 (SELECT count(*) FROM pg_stat_activity WHERE application_name = '$tag')")"
 		[ "${got#*|}" = 1 ] && break
 		sleep 0.1
 	done
