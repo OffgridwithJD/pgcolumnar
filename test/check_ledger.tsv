@@ -2265,6 +2265,7 @@ ttl_expire	ttl_expire	a group whose only NULLs have been deleted is retired	15;1
 ttl_expire	ttl_expire	a later expire on a column of only NULLs reads no zone map	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310);the early exit not taken for a column with no value
 ttl_expire	ttl_expire	a negative ttl_interval is refused with 22023	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a no-op expire reads no zone map when the extent's minimum is past the cutoff	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310)
+ttl_expire	ttl_expire	a role that does not own the table cannot expire it, even holding DELETE (42501)	15;16;17;18;19	2026-10-14	expire without its owner check
 ttl_expire	ttl_expire	a rolled-back expire records nothing	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a row dated exactly on the cutoff is kept, so truncation errs toward keeping	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a table with no declared retention is an error, not a silent success	15;16;17;18;19	2026-10-14	the no-retention refusal raised as XX000 rather than 55000
@@ -2283,6 +2284,7 @@ ttl_expire	ttl_expire	but the zone map still records the deleted NULLs	15;16;17;
 ttl_expire	ttl_expire	compact_rewrite retired a group	15;16;17;18;19	2026-10-14	compact_rewrite returning 0 before rewriting anything
 ttl_expire	ttl_expire	control: a group whose NULLs are still live is NOT retired	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	control: and a positive one is still accepted	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	control: and its owner's expire retires every aged group	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	control: and the rows are all still there	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	control: and those NULL rows survive	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	dropping the table drops its retention record	15;16;17;18;19	never	-
@@ -2295,6 +2297,8 @@ ttl_expire	ttl_expire	expire in the transaction that wrote aged rows retires the
 ttl_expire	ttl_expire	expire on a date column retires at least one group	15;16;17;18;19	2026-10-14	expire returning 0 whatever it retired;the early exit compares the extent's maximum to the cutoff instead of its minimum
 ttl_expire	ttl_expire	expire on a timestamp column retires the groups wholly before the session's local cutoff	15;16;17;18;19	2026-10-14	expire's timestamp cutoff taken from the UTC wall clock, not the session's local time
 ttl_expire	ttl_expire	expire records exactly the groups it retired	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
+ttl_expire	ttl_expire	expire refuses a retention column that is not a time type (42804)	15;16;17;18;19	2026-10-14	expire returning 0 for a retention column that is not a time type
+ttl_expire	ttl_expire	expire refuses a retention column that no longer exists (42703)	15;16;17;18;19	2026-10-14	expire returning 0 for a retention column that no longer exists
 ttl_expire	ttl_expire	expire retired the three aged groups	15;16;17;18;19	2026-10-14	expire returning 0 whatever it retired;the early exit compares the extent's maximum to the cutoff instead of its minimum
 ttl_expire	ttl_expire	expire retires at least one group (#403 item 5a)	15;16;17;18;19	2026-10-14	expire returning 0 whatever it retired;the early exit compares the extent's maximum to the cutoff instead of its minimum
 ttl_expire	ttl_expire	expire retires the aged groups and keeps those of NULLs	15;16;17;18;19	2026-10-14	expire returning 0 whatever it retired
@@ -2304,6 +2308,7 @@ ttl_expire	ttl_expire	premise: an index-only scan is chosen on the all-visible t
 ttl_expire	ttl_expire	premise: and every live row is past the retention	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: and rows dated exactly ON the cutoff, which decide the rounding	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: and the SAME row group holds expired rows and NULL ones	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: each table holds 3000 rows in three row groups	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: in UTC the fixture straddles that session's cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: in a zone on another date the fixture straddles that session's cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: no LIVE row holds a NULL retention value any more	15;16;17;18;19	never	-
@@ -2313,6 +2318,7 @@ ttl_expire	ttl_expire	premise: rows exist on both sides of the cutoff within one
 ttl_expire	ttl_expire	premise: some rows are past the retention and some are not	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: the date fixture has rows on both sides of the cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: the date fixture is laid out in several row groups	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	premise: the declaration still names the dropped column	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: the fixture is ONE row group, so the NULLs share it	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: the fixture is laid out in several row groups	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: the no-op fixture has many row groups	15;16;17;18;19	never	-
@@ -2322,6 +2328,7 @@ ttl_expire	ttl_expire	premise: the table holds NULL retention rows at all	15;16;
 ttl_expire	ttl_expire	premise: the timestamp fixture is six groups of 1,000 rows	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	running it again retires nothing, because nothing new expired	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	seqscan agrees the expired rows are gone	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	set_options accepts an int retention column, so the refusal is expire's	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	the index-only scan is still the plan after expire	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	the retention is recorded where the other options live	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	with the extent, expire retires the same groups	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
