@@ -89,7 +89,7 @@ def test_partition_create_ahead(pgc_conn, expect):
         cur.execute("CREATE TABLE gauge (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
     made = _create_ahead(conn, "gauge")
     expect.num(made, LEAD + 1, "from no partitions it creates enough to reach now plus the lead")
-    expect.num(_kids(conn, "gauge"), made, "premise: the parent now has the partitions it reported")
+    expect.num(_kids(conn, "gauge"), made, "the parent now has the partitions it reported")
     expect.text(_one(conn, "SELECT string_agg(DISTINCT a.amname, ',') FROM pg_inherits i"
                            " JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_am a ON a.oid = c.relam"
                            " WHERE i.inhparent = 'gauge'::regclass"),
@@ -196,16 +196,18 @@ def test_partition_create_ahead(pgc_conn, expect):
     expect.text(f"{gen}|{doubled}", "3|4.5",
                 "a parent with a generated column gets its partitions, and the column stays generated")
 
-    # 31 two-byte characters, 62 bytes: the date suffix must still fit, so the
-    # prefix is shortened by whole characters, never by a broken byte.
-    long_name = "\u00e9" * 31
+    # 63 bytes, the longest an identifier holds, as the shell twin's name is: 31
+    # two-byte characters and one ASCII (#1339; it was 62 bytes under a name that
+    # said 63 characters). The date suffix must still fit, so the prefix is
+    # shortened by whole characters, never by a broken byte.
+    long_name = "\u00e9" * 31 + "x"
     with conn.cursor() as cur:
         cur.execute(f'CREATE TABLE "{long_name}" (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)')
     long_made = value_or_state(f"""SELECT pgcolumnar.partition_create_ahead('"{long_name}"', '6 hours', 2)""")
     kept = _one(conn, "SELECT count(*) FILTER (WHERE c.relname ~ '_[0-9]{8}T[0-9]{6}$' AND octet_length(c.relname) <= 63)"
                       f""" FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = '"{long_name}"'::regclass""")
     expect.text(f"{long_made}|{kept}", "3|3",
-                "a parent with a 63-character name gets partitions whose names keep their dates")
+                "a parent with a 63-byte name gets partitions whose names keep their dates")
 
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE swarm (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
@@ -569,6 +571,20 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
         cur.execute("CREATE TABLE xnl (k int)")
     expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xd', now())"), "55000",
                 "a drop plan for a parent with a DEFAULT partition is refused")
-    expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xn', now())") + "|"
-                + sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xnl', now())"), "55000|55000",
+    # Each by its own check, so the message is in the want (#1339): both answer
+    # 55000, and with one check gone the other could still answer it.
+    def refusal(sql):
+        try:
+            return f"ok: {_one(conn, sql)}"
+        except psycopg.Error as e:
+            return f"{e.sqlstate} {e.diag.message_primary}"
+
+    def name(t):
+        return _one(conn, "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c"
+                          f" JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = '{t}'::regclass")
+
+    expect.text(refusal("SELECT count(*) FROM pgcolumnar.partition_drop_plan('xn', now())") + "|"
+                + refusal("SELECT count(*) FROM pgcolumnar.partition_drop_plan('xnl', now())"),
+                f"55000 {name('xn')} is partitioned on bigint, not on a timestamp|"
+                f"55000 {name('xnl')} is not RANGE-partitioned on one column",
                 "a drop plan for a parent not partitioned on a timestamp is refused")

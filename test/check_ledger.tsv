@@ -1879,7 +1879,7 @@ partition_lifecycle	partition_lifecycle	a drop plan for a parent not partitioned
 partition_lifecycle	partition_lifecycle	a drop plan for a parent with a DEFAULT partition is refused	15;16;17;18;19	2026-10-13	a parent with a DEFAULT partition planned instead of refused
 partition_lifecycle	partition_lifecycle	a parent partitioned on a key that is not a timestamp is refused before any DDL	15;16;17;18;19	2026-10-13	partition_create_ahead without its timestamp key check
 partition_lifecycle	partition_lifecycle	a parent that is not RANGE-partitioned on one column is refused before any DDL	15;16;17;18;19	2026-10-13	partition_create_ahead without its RANGE-on-one-column check
-partition_lifecycle	partition_lifecycle	a parent with a 63-character name gets partitions whose names keep their dates	15;16;17;18;19	2026-10-12	partition_create_ahead stopping one width short of now plus the lead;partition_create_ahead without shortening a long parent name
+partition_lifecycle	partition_lifecycle	a parent with a 63-byte name gets partitions whose names keep their dates	15;16;17;18;19	2026-10-12	partition_create_ahead stopping one width short of now plus the lead;partition_create_ahead without shortening a long parent name
 partition_lifecycle	partition_lifecycle	a parent with a DEFAULT partition is refused	15;16;17;18;19	2026-10-12	partition_create_ahead without the DEFAULT-partition refusal
 partition_lifecycle	partition_lifecycle	a parent with a generated column gets its partitions, and the column stays generated	15;16;17;18;19	2026-10-12	partition_create_ahead stopping one width short of now plus the lead;partition_create_ahead without INCLUDING GENERATED
 partition_lifecycle	partition_lifecycle	a parent with a partition bounded by MAXVALUE is refused, and nothing is created	15;16;17;18;19	2026-10-12	partition_create_ahead without the MAXVALUE refusal
@@ -1924,7 +1924,7 @@ partition_lifecycle	partition_lifecycle	premise: the call inside the transaction
 partition_lifecycle	partition_lifecycle	premise: the drop fixture has several partitions, each holding rows	15;16;17;18;19	never	-
 partition_lifecycle	partition_lifecycle	premise: the function exists	15;16;17;18;19	never	-
 partition_lifecycle	partition_lifecycle	premise: the interrupted detach left the partition pending	15;16;17;18;19	never	-
-partition_lifecycle	partition_lifecycle	premise: the parent now has the partitions it reported	15;16;17;18;19	never	-
+partition_lifecycle	partition_lifecycle	the parent now has the partitions it reported	15;16;17;18;19	never	-
 partition_lifecycle	partition_lifecycle	rows within the covered range go in	15;16;17;18;19	2026-10-12	partition_create_ahead starting from now, not the highest upper bound;partition_create_ahead stopping one width short of now plus the lead
 partition_lifecycle	partition_lifecycle	running the plan leaves only the partitions it did not name	15;16;17;18;19	2026-10-13	the cutoff filter removed: every partition planned;the lower bound read where the upper is meant;the plan detaches but drops nothing
 partition_lifecycle	partition_lifecycle	the plan retires the partitions wholly before the cutoff, in range order	15;16;17;18;19	2026-10-13	a plain DROP, not refusing while the partition is still attached;the cutoff filter removed: every partition planned;the lower bound read where the upper is meant;the plan detaches but drops nothing;the plan detaches without CONCURRENTLY;the plan in catalog order, not range order

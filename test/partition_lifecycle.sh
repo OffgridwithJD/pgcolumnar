@@ -70,7 +70,7 @@ q "CREATE TABLE tl (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);" >/
 made="$(q "SELECT pgcolumnar.partition_create_ahead('tl', '1 day', 3);")"
 check_num "from no partitions it creates enough to reach now plus the lead" \
 	"$made" "$(q "SELECT 4;")"
-check_num "premise: the parent now has the partitions it reported" "$(kids tl)" "$made"
+check_num "the parent now has the partitions it reported" "$(kids tl)" "$made"
 check "every partition it creates is columnar" "$(ams tl)" "pgcolumnar"
 check "they are contiguous, each one width wide" \
 	"$(bounds tl | awk -F'|' 'NR>1 && $1!=prev {gap++} {prev=$2} END {print gap+0}')|$(q "SELECT count(DISTINCT upper - lower) FROM (SELECT (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'TO \\(''([^'']+)''\\)'))[1]::timestamptz AS upper, (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \\(''([^'']+)''\\)'))[1]::timestamptz AS lower FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'tl'::regclass) b;")" \
@@ -161,12 +161,12 @@ gen_made="$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('gen', '1 day'
 check "a parent with a generated column gets its partitions, and the column stays generated" \
 	"$gen_made|$(q "INSERT INTO gen VALUES (now(), 21); SELECT w FROM gen;" | tail -1)" "2|42"
 
-# A 63-character name: the 16-character date suffix must survive, or the second
-# partition's name truncates onto the first's.
+# A 63-byte name, the longest an identifier holds: the 16-byte date suffix must
+# survive, or the second partition's name truncates onto the first's.
 LONG="p_$(printf 'x%.0s' $(seq 1 61))"
 q "CREATE TABLE $LONG (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);" >/dev/null
 long_made="$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('$LONG', '1 day', 2);")"
-check "a parent with a 63-character name gets partitions whose names keep their dates" \
+check "a parent with a 63-byte name gets partitions whose names keep their dates" \
 	"$long_made|$(q "SELECT count(*) FILTER (WHERE c.relname ~ '_[0-9]{8}T[0-9]{6}\$' AND octet_length(c.relname) <= 63)
 	   FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = '$LONG'::regclass;")" "3|3"
 
@@ -445,7 +445,10 @@ check "a drop plan for a parent with a DEFAULT partition is refused" \
 	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('td', now())")" "55000"
 q "CREATE TABLE dn (k int NOT NULL) PARTITION BY RANGE (k);
    CREATE TABLE dnl (k int);" >/dev/null
+# Each by its own check, so the message is in the want (#1339): both answer 55000,
+# and with one check gone the other could still answer it.
 check "a drop plan for a parent not partitioned on a timestamp is refused" \
-	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dn', now())")|$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dnl', now())")" "55000|55000"
+	"$(refusal "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dn', now())")|$(refusal "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dnl', now())")" \
+	"55000 $(rc dn) is partitioned on integer, not on a timestamp|55000 $(rc dnl) is not RANGE-partitioned on one column"
 
 pgc_summary
