@@ -1847,4 +1847,15 @@ suites_not_covered 246
 #     never         1796 + 2 = 1798
 #     dated          547 + 4 =  551
 #     1798 + 551 == 2349
+#
+# #1341, create_rollup's last refusals and rebase_rollup's (OffgridwithJD): 1798 -> 1798.
+# Four new rollup arms, each dated by deleting the check it names: a ts_column that is
+# not timestamptz (which also reddens "no refused rollup left a table behind", since
+# the create then succeeds), a group_by column the source lacks, a sum that cannot be
+# folded, and rebase_rollup of a non-rollup. Five-major runs: rollup 76/76 on 15-19.
+#
+#     ledger rows   2349 + 4 = 2353
+#     never         1798     = 1798
+#     dated          551 + 4 =  555
+#     1798 + 555 == 2353
 checks_never_observed_red 1798

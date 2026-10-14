@@ -445,9 +445,20 @@ check "aggregate functions and columns of different lengths are refused" \
 check "an aggregate column the source does not have is refused" \
 	"$(refused_create r_c '1 hour' '{min}' '{nosuch}')" "22023"
 check "* with anything but count is refused" "$(refused_create r_s '1 hour' '{sum}' '{*}')" "22023"
+# The rest of create_rollup's refusals, and rebase_rollup's (#1341). A timestamp
+# (no zone) source column would be bucketed by date_bin in whatever zone the
+# refresh runs in, so it is refused rather than converted.
+q "CREATE TABLE src_lt (ts timestamp, v int) USING pgcolumnar;" >/dev/null
+check "a ts_column that is not timestamptz is refused" \
+	"$(sqlstate "SELECT pgcolumnar.create_rollup('r_t', 'src_lt', 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');")" "22023"
+check "a group_by column the source does not have is refused" \
+	"$(sqlstate "SELECT pgcolumnar.create_rollup('r_g', 'src', 'ts', '1 hour', '$ORIGIN', '{nosuch}', '{count}', '{*}');")" "22023"
+check "a sum over a column that cannot be folded is refused" "$(refused_create r_f '1 hour' '{sum}' '{ts}')" "22023"
+check "rebase_rollup of a table that is not a rollup is refused (42704)" \
+	"$(sqlstate "SELECT pgcolumnar.rebase_rollup('src');")" "42704"
 # An arm, not a premise: with a refusal removed, the create succeeds and leaves a
 # table (the months-check mutation did), so a repository change reddens it.
 check_num "and no refused rollup left a table behind" \
-	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('r_m', 'r_p', 'r_l', 'r_c', 'r_s');")" "0"
+	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('r_m', 'r_p', 'r_l', 'r_c', 'r_s', 'r_t', 'r_g', 'r_f');")" "0"
 
 pgc_summary
