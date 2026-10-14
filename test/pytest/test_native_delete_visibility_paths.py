@@ -155,7 +155,7 @@ def test_native_delete_visibility_paths(pgc_conn, expect):
     with pgc_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM t WHERE id = 8")
         expect.num(cur.fetchone()[0], 1,
-                   "premise: the rolled-back delete left the row in place")
+                   "the rolled-back delete left the row in place")
 
 
 def test_a_delete_whose_qual_deletes_another_row_matches_heap(pgc_conn, expect):

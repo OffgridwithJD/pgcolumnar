@@ -1920,6 +1920,41 @@ latest_reading	latest_reading	the GROUP BY form returns what DISTINCT ON returns
 latest_reading	latest_reading	the LATERAL form returns what DISTINCT ON returns	15;16;17;18;19	2026-10-12	the document's LATERAL recipe orders by ts ascending, so it returns each device's FIRST reading
 latest_reading	latest_reading	with the btree the LATERAL form reads under a tenth of the table	15;16;17;18;19	never	-
 latest_reading	latest_reading	without the btree the LATERAL form reads the table once per device	15;16;17;18;19	never	-
+native_agg	native_agg	an aggregate that needs zone maps reads them	15;16;17;18;19	never	-
+native_agg	native_agg	avg(int4,nulls)	15;16;17;18;19	never	-
+native_agg	native_agg	control: decoding ts reads the table's blocks	15;16;17;18;19	never	-
+native_agg	native_agg	count(*)	15;16;17;18;19	never	-
+native_agg	native_agg	count(*) beats a parallel plan	15;16;17;18;19	never	-
+native_agg	native_agg	count(*) plan has no Gather	15;16;17;18;19	never	-
+native_agg	native_agg	count(*) reads no zone maps	15;16;17;18;19	never	-
+native_agg	native_agg	count(*) uses the metadata agg node	15;16;17;18;19	never	-
+native_agg	native_agg	count(col,nulls)	15;16;17;18;19	never	-
+native_agg	native_agg	empty count(*)	15;16;17;18;19	never	-
+native_agg	native_agg	empty min NULL	15;16;17;18;19	never	-
+native_agg	native_agg	empty sum NULL	15;16;17;18;19	never	-
+native_agg	native_agg	filtered aggregate not metadata node	15;16;17;18;19	never	-
+native_agg	native_agg	filtered aggregate parity	15;16;17;18;19	never	-
+native_agg	native_agg	max(int4)	15;16;17;18;19	never	-
+native_agg	native_agg	max(text)	15;16;17;18;19	never	-
+native_agg	native_agg	max(timestamptz) parity	15;16;17;18;19	never	-
+native_agg	native_agg	max(timestamptz) parity after deleting the newest rows	15;16;17;18;19	never	-
+native_agg	native_agg	max(ts) over timestamptz plans the metadata agg node	15;16;17;18;19	2026-10-14	the metadata min/max aggregate refusing timestamptz, so max(ts) and min(ts) fall back to decoding the column
+native_agg	native_agg	max(ts) reads under a tenth of the blocks a decode of ts reads	15;16;17;18;19	2026-10-14	the metadata min/max aggregate refusing timestamptz, so max(ts) and min(ts) fall back to decoding the column
+native_agg	native_agg	min(int4)	15;16;17;18;19	never	-
+native_agg	native_agg	min(int4,nulls)	15;16;17;18;19	never	-
+native_agg	native_agg	min(text)	15;16;17;18;19	never	-
+native_agg	native_agg	min(timestamptz) parity	15;16;17;18;19	never	-
+native_agg	native_agg	min(timestamptz) parity after deleting the oldest rows	15;16;17;18;19	never	-
+native_agg	native_agg	min(ts) reads under a tenth of the blocks a decode of ts reads	15;16;17;18;19	2026-10-14	the metadata min/max aggregate refusing timestamptz, so max(ts) and min(ts) fall back to decoding the column
+native_agg	native_agg	multi-agg	15;16;17;18;19	never	-
+native_agg	native_agg	multi-agg beats a parallel plan	15;16;17;18;19	never	-
+native_agg	native_agg	multi-agg plan has no Gather	15;16;17;18;19	never	-
+native_agg	native_agg	premise: the timestamptz table holds every row inserted	15;16;17;18;19	never	-
+native_agg	native_agg	sum(bigint) fallback parity	15;16;17;18;19	never	-
+native_agg	native_agg	sum(int4)	15;16;17;18;19	never	-
+native_agg	native_agg	sum(int4,nulls)	15;16;17;18;19	never	-
+native_agg	native_agg	sum/min/max uses the metadata agg node	15;16;17;18;19	never	-
+native_agg	native_agg	the deletes removed rows at both ends, the same rows from each	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	a sequential scan of the same poisoned chunk is refused (XX001)	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	an index fetch of a chunk whose page_length is 2^32 too large is refused (XX001)	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	backend survived the sequential refusal	15;16;17;18;19	never	-
@@ -2213,6 +2248,15 @@ projection_scan_io	projection_scan_io	premise: the empty projection is found and
 projection_scan_io	projection_scan_io	premise: the plan uses the covering projection	15;16;17;18;19	never	-
 projection_scan_io	projection_scan_io	premise: the projection row still exists after its storage id is cleared	15;16;17;18;19	never	-
 projection_scan_io	projection_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
+projection_update	projection_update	covering projection scan matches heap after updating a non-projected column	15;16;17;18;19	2026-10-14	projection rows storing the first projected column's value in every projected column
+projection_update	projection_update	covering projection scan matches heap after updating a projected column	15;16;17;18;19	2026-10-14	projection rows storing the first projected column's value in every projected column
+projection_update	projection_update	every column matches heap after updating a non-projected column	15;16;17;18;19	never	-
+projection_update	projection_update	full-table projection scan still matches heap	15;16;17;18;19	never	-
+projection_update	projection_update	planner uses the covering projection	15;16;17;18;19	2026-10-14	the planner never offering a covering projection scan
+projection_update	projection_update	projection matches the heap before any update	15;16;17;18;19	2026-10-14	projection rows storing the first projected column's value in every projected column
+projection_update	projection_update	read_projection matches the live base after that update	15;16;17;18;19	2026-10-14	projection rows storing the first projected column's value in every projected column
+projection_update	projection_update	read_projection still matches the live base	15;16;17;18;19	2026-10-14	projection rows storing the first projected column's value in every projected column
+projection_update	projection_update	reconstruct via the projection still rebuilds every live row	15;16;17;18;19	2026-10-14	projection rows storing the first projected column's value in every projected column
 range_pruning	range_pruning	a clustered overlap near the end skips the four vectors only their upper bounds rule out	15;16;17;18;19	2026-10-13	native_range_excludes never using max_upper (haveUpper forced false)
 range_pruning	range_pruning	a clustered overlap skips vectors instead of decoding them	15;16;17;18;19	never	-
 range_pruning	range_pruning	a scattered column skips nothing, which is what the documentation says	15;16;17;18;19	never	-

@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 240
+suites_not_covered 238
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2089,4 +2089,29 @@ suites_not_covered 240
 #     never         1988 - 2 = 1986
 #     dated          596 + 2 = 598
 #     1986 + 598 == 2584
-checks_never_observed_red 1986
+#
+# #1339 audit, five premises a product change reddens (jdatcmd): 1986 -> 2020, and
+# suites_not_covered 240 -> 238. Five checks named `premise:` test product code and
+# lose the prefix in both twins (#1236); #1356 already renamed two of them, the max(ts)
+# and wide-fetch checks. native_agg and projection_update had no rows;
+# they enter with all their checks from five-major runs (35/35 and 9/9 on each of
+# 15-19), because a renamed check in an unseeded suite has no row to date. Dated here:
+#   - "max(ts) over timestamptz plans the metadata agg node", with the two block-count
+#     arms beside it, by the metadata min/max aggregate refusing timestamptz;
+#   - "the wide fetch returns the projected values" was already renamed and dated by
+#     #1356, with the same mutation, so this PR leaves its row as main has it;
+#   - "planner uses the covering projection", by the planner never offering a
+#     covering projection scan;
+#   - "projection matches the heap before any update", with the five projection arms
+#     after it, by projection rows storing the first projected column's value in
+#     every projected column.
+# The fifth, "the rolled-back delete left the row in place", exists only in
+# native_delete_visibility_paths' pytest twin, which the ledger does not record; its
+# red is the delete-vector read seeing aborted catalog rows. The other 34 seeded rows
+# arrive never: seeding a suite moves the census up by its undated rows.
+#
+#     ledger rows   2584 + 35 + 9      = 2628
+#     never         1986 + 35 + 9 - 10 = 2020
+#     dated          598 + 10           =  608
+#     2020 + 608 == 2628
+checks_never_observed_red 2020

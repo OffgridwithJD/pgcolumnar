@@ -24,9 +24,9 @@ psql_run "ANALYZE pu;"
 psql_run "CREATE TABLE pu_h (a int, b text, c int) USING heap;"
 psql_run "INSERT INTO pu_h SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g;"
 
-check "premise: planner uses the covering projection" \
+check "planner uses the covering projection" \
 	"$(q "EXPLAIN (COSTS OFF) SELECT a, c FROM pu WHERE c BETWEEN 100 AND 200;" | grep -c 'Columnar Projection: pc')" "1"
-check "premise: projection matches the heap before any update" \
+check "projection matches the heap before any update" \
 	"$(pgc_set_hash "SELECT a, c FROM pu WHERE c BETWEEN 100 AND 200")" \
 	"$(pgc_set_hash "SELECT a, c FROM pu_h WHERE c BETWEEN 100 AND 200")"
 
