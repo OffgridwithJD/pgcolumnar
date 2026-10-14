@@ -322,9 +322,12 @@ for _t in ttl_hcol ttl_hiv; do
 	          SELECT pgcolumnar.set_options('$_t', stripe_row_limit => 1000);
 	          INSERT INTO $_t SELECT g, now() - interval '10 days' FROM generate_series(1, 3000) g;"
 done
-check "premise: set_options takes a retention column without an interval" \
+# Checks, not premises (#1236; #1370 review): set_options refusing a half declaration
+# is a change to this repository's SQL, and it turns both red while the expire arms
+# below stay green for an unrelated reason, so they are what notices it.
+check "set_options takes a retention column without an interval" \
 	"$(ttl_state "SELECT pgcolumnar.set_options('ttl_hcol', ttl_column => 'ts');")|$(q "SELECT coalesce(ttl_column::text, '-') || '|' || coalesce(ttl_interval::text, '-') FROM pgcolumnar.options WHERE regclass = 'ttl_hcol'::regclass;")" "|ts|-"
-check "premise: and an interval without a column" \
+check "and an interval without a column" \
 	"$(ttl_state "SELECT pgcolumnar.set_options('ttl_hiv', ttl_interval => '1 day');")|$(q "SELECT coalesce(ttl_column::text, '-') || '|' || coalesce(ttl_interval::text, '-') FROM pgcolumnar.options WHERE regclass = 'ttl_hiv'::regclass;")" "|-|1 day"
 check "a retention column without an interval is no retention: refused (55000), every row kept" \
 	"$(ttl_state "SELECT pgcolumnar.expire('ttl_hcol');")|$(q 'SELECT count(*) FROM ttl_hcol')" "55000|3000"

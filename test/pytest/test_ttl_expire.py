@@ -481,10 +481,10 @@ def test_a_half_declaration_is_no_retention(pgc_conn, expect):
 
     col_state = _sqlstate(pgc_conn, "SELECT pgcolumnar.set_options('ttl_hcol', ttl_column => 'ts')")
     expect.text(f"{col_state}|{declared('ttl_hcol')}", "|ts|-",
-                "premise: set_options takes a retention column without an interval")
+                "set_options takes a retention column without an interval")
     iv_state = _sqlstate(pgc_conn, "SELECT pgcolumnar.set_options('ttl_hiv', ttl_interval => '1 day')")
     expect.text(f"{iv_state}|{declared('ttl_hiv')}", "|-|1 day",
-                "premise: and an interval without a column")
+                "and an interval without a column")
     hcol = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_hcol')")
     expect.text(f"{hcol}|{_one(pgc_conn, 'SELECT count(*) FROM ttl_hcol')}", "55000|3000",
                 "a retention column without an interval is no retention: refused (55000), every row kept")
