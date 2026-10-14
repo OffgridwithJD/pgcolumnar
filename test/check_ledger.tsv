@@ -576,11 +576,11 @@ entry_point_privilege	entry_point_privilege	the catalog and the install script a
 entry_point_privilege	entry_point_privilege	the catalog-governed class is the six from #560	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the owner can call get_storage_id, so a refusal below is a refusal	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the owner can call read_projection, so a refusal below is a refusal	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	the owner can call reconstruct_via_projection, so a refusal below is a refusal	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	the owner can call reconstruct_via_projection, so a refusal below is a refusal	15;16;17;18;19	2026-10-14	reconstruct_via_projection refuses even a superuser owner
 entry_point_privilege	entry_point_privilege	the owner can call vm_is_visible, so a refusal below is a refusal	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the owner can call vm_selftest, so a refusal below is a refusal	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the relation-by-other-means class is the three that are known	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	vm_is_visible refuses an unprivileged caller with 42501	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	vm_is_visible refuses an unprivileged caller with 42501	15;16;17;18;19	2026-10-14	vm_is_visible without its owner check
 entry_point_privilege	entry_point_privilege	vm_selftest refuses an unprivileged caller with 42501	15;16;17;18;19	never	-
 fdw_plan_privilege	fdw_plan_privilege	a privileged planner estimates the Iceberg table from its manifests	15;16;17;18;19	never	-
 fdw_plan_privilege	fdw_plan_privilege	a privileged planner estimates the Parquet table from the file's size	15;16;17;18;19	never	-

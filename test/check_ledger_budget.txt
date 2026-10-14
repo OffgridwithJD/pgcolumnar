@@ -2076,4 +2076,17 @@ suites_not_covered 240
 #     never         1962 + 26 = 1988
 #     dated          591 +  5 = 596
 #     1988 + 596 == 2584
-checks_never_observed_red 1988
+#
+# #1387 review (OffgridwithJD): 1988 -> 1986. The five owner-call checks lose the premise
+# prefix: a function refusing even its owner is a product change, and the shell now
+# reads the call by psql's exit status ("q ... && echo ok" always printed ok). The
+# reconstruct one is dated by reconstruct_via_projection refusing a superuser, and
+# vm_is_visible's 42501 arm by its owner check removed. The shell grants EXECUTE by OID
+# on every overload, so the EXECUTE premise depends on the fixture alone and stays one.
+# Five-major runs: 31/31 on 15-19.
+#
+#     ledger rows   2584     = 2584
+#     never         1988 - 2 = 1986
+#     dated          596 + 2 = 598
+#     1986 + 598 == 2584
+checks_never_observed_red 1986
