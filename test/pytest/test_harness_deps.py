@@ -1285,6 +1285,10 @@ SHELL_REFERENCES = {
         "with its own Python reader, to find an EXIT trap that replaces the one setup "
         "arms (#1321). It never sources or executes either: the rule is about what "
         "the shell text says, so the text is the only place to read it",
+    "test_every_suite_job_installs_the_extensions.py":
+        "names the matrix and coverage runners' file names as data, to recognise a "
+        "workflow step that runs the suites (#1382). It reads only the two workflow "
+        "files and never reads or executes the runners themselves",
 }
 
 _SHELL_NAMES = re.compile(
