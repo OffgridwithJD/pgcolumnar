@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 228
+suites_not_covered 227
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2607,4 +2607,18 @@ suites_not_covered 228
 #     never         2360 + 2 = 2362
 #     dated          795 + 3 =  798
 #     2362 + 798 == 3160
-checks_never_observed_red 2362
+#
+# #1341, objstore_allowlist seeded, with its twin and a fixed admin-override arm
+# (OffgridwithJD): 2362 -> 2374, and suites_not_covered 228 -> 227. The suite had no
+# rows. It enters with all 16 checks from five-major runs (16/16 on each of 15-19).
+# Four are dated: the two default-deny arms by an empty list that admits every
+# endpoint; the non-superuser arm and the admin-override arm by the setting defined
+# PGC_SIGHUP. Main's admin-override arm survived that one, because the configured
+# list still named 127.0.0.1; it now runs with the list empty. The other 12 arrive
+# never.
+#
+#     ledger rows   3160 + 16 = 3176
+#     never         2362 + 12 = 2374
+#     dated          798 +  4 = 802
+#     2374 + 802 == 3176
+checks_never_observed_red 2374
