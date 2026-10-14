@@ -174,7 +174,7 @@ def test_every_relation_taking_entry_point_has_a_decided_bar(pgc_conn, pgc_clust
             owner = "ok"
         except psycopg.Error:
             owner = "broken"
-        expect.text(owner, "ok", f"premise: the owner can call {fn}, so a refusal below is a refusal")
+        expect.text(owner, "ok", f"the owner can call {fn}, so a refusal below is a refusal")
         expect.text(_as_ep(pgc_cluster, schema, sql)[0], "42501", f"{fn} refuses an unprivileged caller with 42501")
 
     # The four file siblings gate on a server-file role BEFORE the table, so the role

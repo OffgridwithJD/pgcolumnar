@@ -570,15 +570,15 @@ entry_point_privilege	entry_point_privilege	premise: t_ep holds the server-file 
 entry_point_privilege	entry_point_privilege	premise: t_ep now holds EXECUTE, so a refusal below can only be the C check	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	premise: the extension is installed and C entry points were found	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	premise: the install script declares MODULE_PATHNAME symbols at all	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	premise: the owner can call get_storage_id, so a refusal below is a refusal	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	premise: the owner can call read_projection, so a refusal below is a refusal	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	premise: the owner can call reconstruct_via_projection, so a refusal below is a refusal	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	premise: the owner can call vm_is_visible, so a refusal below is a refusal	15;16;17;18;19	never	-
-entry_point_privilege	entry_point_privilege	premise: the owner can call vm_selftest, so a refusal below is a refusal	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	read_projection refuses an unprivileged caller with 42501	15;16;17;18;19	2026-10-14	read_projection without its SELECT check
 entry_point_privilege	entry_point_privilege	reconstruct_via_projection refuses an unprivileged caller with 42501	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the catalog and the install script agree on the symbol set	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the catalog-governed class is the six from #560	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	the owner can call get_storage_id, so a refusal below is a refusal	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	the owner can call read_projection, so a refusal below is a refusal	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	the owner can call reconstruct_via_projection, so a refusal below is a refusal	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	the owner can call vm_is_visible, so a refusal below is a refusal	15;16;17;18;19	never	-
+entry_point_privilege	entry_point_privilege	the owner can call vm_selftest, so a refusal below is a refusal	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	the relation-by-other-means class is the three that are known	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	vm_is_visible refuses an unprivileged caller with 42501	15;16;17;18;19	never	-
 entry_point_privilege	entry_point_privilege	vm_selftest refuses an unprivileged caller with 42501	15;16;17;18;19	never	-
