@@ -2137,4 +2137,17 @@ suites_not_covered 237
 #     never         2020 + 21 = 2041
 #     dated          608 +  7 =  615
 #     2041 + 615 == 2656
-checks_never_observed_red 2041
+#
+# #1341, am_contracts (jdatcmd): 2041 -> 2050. A new suite, seeded from five-major runs
+# (27/27 on each of 15-19), so suites_not_covered does not rise. 27 rows: 18 arrive
+# dated by seven mutations on PG 18 -- the speculative-insert stub, the withdrawal
+# disabled, no ExecutorEnd flush, TRUNCATE emptying the old storage in place, the
+# flush-every-subtransaction ExecutorEnd, the dirty fetch answering an in-progress
+# delete as final, and the index build skipping deleted rows -- each merged with
+# --target naming every check it reddened. 9 arrive never: 5 premises and 4 controls.
+#
+#     ledger rows   2656 + 27      = 2683
+#     never         2041 + 27 - 18 = 2050
+#     dated          615 + 18      =  633
+#     2050 + 633 == 2683
+checks_never_observed_red 2050

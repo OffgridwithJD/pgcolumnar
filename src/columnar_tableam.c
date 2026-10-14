@@ -1986,6 +1986,32 @@ pgcolumnar_index_fetch_tuple(struct IndexFetchTableData *scan, ItemPointer tid,
 	else if (PgColumnarBufferedRowByNumber(rel, rowNumber,
 										 slot->tts_values, slot->tts_isnull))
 		ExecStoreVirtualTuple(slot);
+	else if (snapshot != NULL && snapshot->snapshot_type == SNAPSHOT_DIRTY &&
+			 (TransactionIdIsValid(snapshot->xmin) ||
+			  TransactionIdIsValid(snapshot->xmax)) &&
+			 PgColumnarRowIsLive(rel, SnapshotAny, rowNumber))
+	{
+		/*
+		 * A DELETE STILL IN PROGRESS IS NOT A DELETE YET (#1341). The row reads
+		 * as gone only because another transaction's uncommitted delete-vector
+		 * row says so, and the catalog read above recorded that transaction in
+		 * the dirty snapshot. Answering "no such row" let _bt_check_unique insert
+		 * a duplicate without waiting: when the delete then rolled back, the key
+		 * had two live rows. Measured before this change: an INSERT of k racing
+		 * an uncommitted DELETE of k, then a ROLLBACK, committed and left two
+		 * rows with k.
+		 *
+		 * Heap answers such a row as present, with xmax naming the deleter, and
+		 * the caller waits on it and asks again with the outcome known. Report
+		 * the row the same way. The snapshot's xmin/xmax are left as the catalog
+		 * read set them, so the caller waits on that transaction. If the in-progress
+		 * change was not the one that deleted this row, the cost is a wait and a
+		 * re-check, never a wrong answer. The row's values are not needed by the
+		 * uniqueness check, so they are fetched under SnapshotAny, as for a row
+		 * the caller already knows the fate of.
+		 */
+		PgColumnarSlotStoreDeferred(slot, rel, SnapshotAny, rowNumber);
+	}
 	else
 		return false;
 
@@ -2137,20 +2163,54 @@ pgcolumnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 }
 #endif
 
+/*
+ * Speculative insertion, which INSERT ... ON CONFLICT uses whenever an arbiter
+ * index exists (#1341). docs/limitations.md promised DO NOTHING "works", and it
+ * raised 0A000 on any table with a unique index, which is the only table ON
+ * CONFLICT arbitrates on.
+ *
+ * The executor's pre-check already skips a conflict it can see, without
+ * inserting. What reaches here is a row that looked free: insert it as an
+ * ordinary row, and if the arbiter index then reports a conflict (a concurrent
+ * inserter won), withdraw it again by marking it deleted.
+ *
+ * NO SPECULATIVE TOKEN. Heap stamps the token so a waiter can wait on the
+ * insertion rather than on the whole transaction. Here a waiter waits on the
+ * transaction, which is correct and only coarser. The same unique-key lock the
+ * ordinary insert takes (issue #5) serialises two inserters of one key.
+ *
+ * WITHDRAWN, NOT "SUPER-DELETED". Heap makes an aborted speculative tuple
+ * invisible to everyone at once. A delete mark is transactional, but the row was
+ * never visible outside this transaction, and it commits or aborts together
+ * with the mark. So no other session can ever see it, and this one never does
+ * either, since the executor does not return a withdrawn row.
+ *
+ * DO UPDATE is still refused, and not here: a conflict sends the executor to
+ * lock the existing row, and row locking is unsupported (0A000).
+ */
 static void
 pgcolumnar_tuple_insert_speculative(Relation rel, TupleTableSlot *slot,
 								  CommandId cid, COLUMNAR_TABLE_OPTIONS options,
 								  struct BulkInsertStateData *bistate,
 								  uint32 specToken)
 {
-	COLUMNAR_UNSUPPORTED("speculative insert");
+	pgcolumnar_tuple_insert(rel, slot, cid, options, bistate);
 }
 
 static void
 pgcolumnar_tuple_complete_speculative(Relation rel, TupleTableSlot *slot,
 									uint32 specToken, bool succeeded)
 {
-	COLUMNAR_UNSUPPORTED("speculative insert");
+	if (succeeded)
+		return;
+
+	/*
+	 * The row may still be buffered, and a delete mark needs the row group
+	 * that covers it. Flush first, as the projection back-fill does before it
+	 * reads this transaction's rows.
+	 */
+	PgColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
+	PgColumnarMarkRowDeleted(rel, PgColumnarItemPointerToRowNumber(&slot->tts_tid));
 }
 
 /*
@@ -2363,6 +2423,7 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	Datum		indexValues[INDEX_MAX_KEYS];
 	bool		indexNulls[INDEX_MAX_KEYS];
 	double		reltuples = 0;
+	bool		alive;
 	uint64		rowNumber;
 
 	if (start_blockno != 0 || numblocks != InvalidBlockNumber)
@@ -2476,6 +2537,9 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		ownReadState = true;
 	}
 
+	/* deleted rows too, flagged, so the build can index them as not alive (#1341) */
+	PgColumnarReadSetEmitDeleted(readState, true);
+
 	/*
 	 * Say which branch ran and how wide the reader it produced will actually
 	 * read, so a test can assert the projection NARROWED rather than infer it
@@ -2506,8 +2570,10 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 								 &rowNumber))
 			break;
 		ExecStoreVirtualTuple(slot);
+		alive = !PgColumnarReadLastRowDeleted(readState);
 
-		reltuples += 1;
+		if (alive)
+			reltuples += 1;
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
 
@@ -2518,7 +2584,19 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 
 		PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 
-		callback(index_rel, &slot->tts_tid, indexValues, indexNulls, true,
+		/*
+		 * A DELETED ROW IS INDEXED TOO, AS NOT ALIVE (#1341). The build reads
+		 * under a current snapshot, but a transaction whose snapshot began before
+		 * the delete still sees the row, and may use this index. Leaving the row
+		 * out made that transaction's index scan miss a row it can see. Measured
+		 * before this change: REPEATABLE READ, then a committed DELETE of row
+		 * 4242, then CREATE INDEX; the old snapshot's index lookup of 4242 found
+		 * 0 rows, where its scan of the table found 1. Heap indexes a
+		 * recently-dead tuple the same way, as not alive, so a unique index does
+		 * not count it as a duplicate. The fetch still filters by each caller's
+		 * snapshot, so a new snapshot does not see the row by this entry.
+		 */
+		callback(index_rel, &slot->tts_tid, indexValues, indexNulls, alive,
 				 callback_state);
 	}
 
@@ -2781,8 +2859,15 @@ pgcolumnar_executor_end(QueryDesc *queryDesc)
 	else
 		standard_ExecutorEnd(queryDesc);
 
-	PgColumnarFlushAllPendingWrites();
-	PgColumnarFlushAllDeleteVectors();
+	/*
+	 * ONLY THIS SUBTRANSACTION'S BUFFERS (#1341). A statement ending inside a
+	 * plpgsql EXCEPTION block runs here while the block's subtransaction is
+	 * current; flushing the enclosing statement's buffers now would attribute
+	 * them to the block, and its rollback would lose them. They are flushed when
+	 * their own statement ends, back in their own subtransaction.
+	 */
+	PgColumnarFlushPendingWritesOfSubXact(GetCurrentSubTransactionId());
+	PgColumnarFlushDeleteVectorsOfSubXact(GetCurrentSubTransactionId());
 
 	/*
 	 * The fetch cache is scoped to a statement, so release it here rather than

@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+#
+# Contracts the access method owes core DML and transactions, each one stated in
+# docs/ or owed by core's table-AM interface, and none of them tested before #1341.
+# One section per contract, each a promise someone relies on without reading the C.
+#
+# Usage:  test/am_contracts.sh [PG_CONFIG]
+# Written fresh for pgColumnar.
+
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
+
+# state SQL -> "ok" when it succeeds, or the SQLSTATE it raised. A refusal is decided by
+# its code, not its wording.
+state() {
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-At -v VERBOSITY=sqlstate -v ON_ERROR_STOP=1 -c "$1" 2>&1)" && { echo ok; return; }
+	sed -n 's/^.*ERROR:[[:space:]]*\([0-9A-Z]\{5\}\).*$/\1/p' <<<"$out" | head -1
+}
+
+# ---- INSERT ... ON CONFLICT (docs/limitations.md:655-656) ----------------------
+#
+# The documented contract: DO NOTHING "works", and DO UPDATE "takes a row lock and
+# raises the same error" as other row locking. Both on a table whose unique index is
+# what ON CONFLICT arbitrates on -- the case anybody uses it for.
+psql_run "CREATE TABLE oc (id int PRIMARY KEY, v text) USING pgcolumnar;"
+psql_run "INSERT INTO oc SELECT g, 'v' || g FROM generate_series(1, 10) g;"
+check "premise: the conflict table holds ten rows" "$(q 'SELECT count(*) FROM oc')" "10"
+
+check "ON CONFLICT DO NOTHING skips the duplicate and inserts the new row" \
+	"$(state "INSERT INTO oc VALUES (5, 'dup'), (11, 'new') ON CONFLICT DO NOTHING;")|$(q "SELECT count(*) || '|' || (SELECT v FROM oc WHERE id = 5) FROM oc")" \
+	"ok|11|v5"
+check "and so does ON CONFLICT (id) DO NOTHING, naming its arbiter" \
+	"$(state "INSERT INTO oc VALUES (6, 'dup'), (12, 'new') ON CONFLICT (id) DO NOTHING;")|$(q "SELECT count(*) || '|' || (SELECT v FROM oc WHERE id = 6) FROM oc")" \
+	"ok|12|v6"
+check "ON CONFLICT DO UPDATE is refused as unsupported (0A000), and changes nothing" \
+	"$(state "INSERT INTO oc VALUES (7, 'upd') ON CONFLICT (id) DO UPDATE SET v = excluded.v;")|$(q "SELECT count(*) || '|' || (SELECT v FROM oc WHERE id = 7) FROM oc")" \
+	"0A000|12|v7"
+
+check "ON CONFLICT DO UPDATE with no conflicting row inserts it" \
+	"$(state "INSERT INTO oc VALUES (13, 'upd') ON CONFLICT (id) DO UPDATE SET v = excluded.v;")|$(q "SELECT count(*) || '|' || (SELECT v FROM oc WHERE id = 13) FROM oc")" \
+	"ok|13|upd"
+check "a key twice in one DO NOTHING statement is inserted once, the first time" \
+	"$(state "INSERT INTO oc VALUES (30, 'first'), (30, 'second') ON CONFLICT DO NOTHING;")|$(q "SELECT count(*) || '|' || min(v) FROM oc WHERE id = 30")" \
+	"ok|1|first"
+
+# THE WITHDRAWAL PATH. A row that looked free at the pre-check but conflicts once
+# inserted, because another session inserted the key and had not committed. The
+# first session holds key 20 uncommitted; the second runs DO NOTHING on 20 and 21,
+# waits, and must end with exactly one row 20 -- the first session's -- and its 21.
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+	-c "BEGIN; INSERT INTO oc VALUES (20, 'holder'); SELECT pg_sleep(3); COMMIT;" >/dev/null 2>&1 &
+_oc_holder=$!
+sleep 1
+_oc_racer="$(state "INSERT INTO oc VALUES (20, 'racer'), (21, 'racer') ON CONFLICT DO NOTHING;")"
+wait "$_oc_holder"
+check "a DO NOTHING racing an uncommitted insert of the same key waits, then skips it" \
+	"$_oc_racer|$(q "SELECT count(*) FILTER (WHERE id = 20) || '|' || min(v) FILTER (WHERE id = 20) || '|' || count(*) FILTER (WHERE id = 21) FROM oc")" \
+	"ok|1|holder|1"
+check "and the unique index answers the key with that one row" \
+	"$(q "SET enable_seqscan = off; SELECT count(*) || '|' || min(v) FROM oc WHERE id = 20;" | tail -1)" "1|holder"
+
+# THE WITHDRAWAL ITSELF, which the arm above does not reach: there the pre-check sees
+# the holder's row and waits. A row is withdrawn only when another session inserts
+# the key after this one's pre-check and before its own insert -- a window no
+# ordering of two sessions can force. So eight sessions race on the same keys, each
+# taken from the clock, for a few seconds. Measured: 0 duplicate keys on three runs;
+# with the withdrawal disabled, 407 to 507.
+psql_run "CREATE TABLE ocs (id bigint PRIMARY KEY, w int) USING pgcolumnar;"
+_oc_sql="$PGC_WORKDIR/oc_race.sql"
+for _i in $(seq 1 1500); do
+	echo "INSERT INTO ocs VALUES ((extract(epoch FROM clock_timestamp()) * 200)::bigint, 1) ON CONFLICT DO NOTHING;"
+done > "$_oc_sql"
+_oc_pids=""
+for _w in 1 2 3 4 5 6 7 8; do
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -q \
+		-f "$_oc_sql" > "$PGC_WORKDIR/oc_race.$_w.out" 2>&1 &
+	_oc_pids="$_oc_pids $!"
+done
+wait $_oc_pids
+_oc_errors="$(cat "$PGC_WORKDIR"/oc_race.*.out | grep -c 'ERROR' || true)"
+check "premise: the racing sessions contended for keys" \
+	"$(q "SELECT (count(*) < 8 * 1500)::text FROM ocs")" "true"
+check "sessions racing DO NOTHING on the same keys leave each key once, with no error" \
+	"$(q "SELECT count(*) - count(DISTINCT id) FROM ocs")|$_oc_errors" "0|0"
+
+# ---- a TRUNCATE that rolls back restores every row (#1341) -------------------------
+#
+# TRUNCATE swaps the table onto new storage (set_new_filelocator), so the old
+# storage's rows and catalog entries must survive until the swap commits, and come
+# back whole if it does not -- at transaction level and to a savepoint.
+psql_run "CREATE TABLE tr (id int PRIMARY KEY, v int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('tr', stripe_row_limit => 1000);"
+psql_run "INSERT INTO tr SELECT g, g * 3 FROM generate_series(1, 5000) g;"
+_tr_before="$(q "SELECT count(*) || '|' || sum(v) FROM tr")"
+check "premise: the truncate table holds 5000 rows" "$_tr_before" "5000|37507500"
+psql_run "BEGIN; TRUNCATE tr; ROLLBACK;"
+check "a TRUNCATE rolled back at transaction level restores every row" \
+	"$(q "SELECT count(*) || '|' || sum(v) FROM tr")" "$_tr_before"
+check "and the primary key still finds them by index" \
+	"$(q "SET enable_seqscan = off; SELECT v FROM tr WHERE id = 4321;" | tail -1)" "12963"
+psql_run "BEGIN; SAVEPOINT s; TRUNCATE tr; ROLLBACK TO SAVEPOINT s; INSERT INTO tr VALUES (5001, 1); COMMIT;"
+check "a TRUNCATE rolled back to a savepoint restores every row, and the transaction goes on" \
+	"$(q "SELECT count(*) || '|' || sum(v) FROM tr")" "5001|37507501"
+check "and the primary key still refuses a duplicate of a restored row" \
+	"$(state "INSERT INTO tr VALUES (17, 0);")" "23505"
+
+# AND THE ROWS THE PARENT BUFFERED BEFORE THE SAVEPOINT. TRUNCATE discards the cached
+# write state; rows inserted earlier in the same transaction may still be in it,
+# unflushed, and ROLLBACK TO SAVEPOINT must bring them back with the table. 2500 rows,
+# not a multiple of the 1000-row stripe, so the last 500 are still buffered.
+psql_run "BEGIN; INSERT INTO tr SELECT g, 1 FROM generate_series(6001, 8500) g; SAVEPOINT s; TRUNCATE tr; INSERT INTO tr SELECT g, 2 FROM generate_series(1, 5) g; ROLLBACK TO SAVEPOINT s; COMMIT;"
+check "rows the parent buffered before a savepoint survive a TRUNCATE rolled back to it" \
+	"$(q "SELECT count(*) || '|' || sum(v) FROM tr")" "7501|37510001"
+
+# ---- an aborted inner block keeps the outer statement's rows (#1341) ---------------
+#
+# A plpgsql EXCEPTION block is a subtransaction. A statement inside it ends, and its
+# ExecutorEnd flushes every pending write -- the OUTER statement's buffered rows and
+# delete marks too. If what that flush writes belongs to the inner subtransaction,
+# the block's rollback takes the outer rows with it. Each arm is run on heap too, and
+# the columnar answer must be heap's.
+psql_run "CREATE TABLE sx_side (id int) USING pgcolumnar;"
+psql_run "CREATE FUNCTION sx_f(i int) RETURNS int LANGUAGE plpgsql AS \$\$
+BEGIN
+	BEGIN
+		INSERT INTO sx_side VALUES (i);
+		PERFORM 1 / 0;
+	EXCEPTION WHEN division_by_zero THEN NULL;
+	END;
+	RETURN i;
+END \$\$;"
+for am in pgcolumnar heap; do
+	psql_run "CREATE TABLE sx_$am (id int) USING $am;"
+	psql_run "INSERT INTO sx_$am SELECT sx_f(g) FROM generate_series(1, 5000) g;"
+done
+check "an outer insert survives an aborted inner block, as on heap" \
+	"$(q "SELECT count(*) || '|' || sum(id) FROM sx_pgcolumnar")" "$(q "SELECT count(*) || '|' || sum(id) FROM sx_heap")"
+check "and the inner block's own rows are gone" "$(q "SELECT count(*) FROM sx_side")" "0"
+for am in pgcolumnar heap; do
+	psql_run "DELETE FROM sx_$am WHERE id % 2 = 0 AND sx_f(id) IS NOT NULL;"
+done
+check "an outer delete survives an aborted inner block, as on heap" \
+	"$(q "SELECT count(*) || '|' || sum(id) FROM sx_pgcolumnar")" "$(q "SELECT count(*) || '|' || sum(id) FROM sx_heap")"
+
+# ---- an insert racing an uncommitted delete of its key (#1341) ----------------------
+#
+# Session 1 deletes key k and has not committed; session 2 inserts k. On heap session
+# 2 waits for session 1: a rollback leaves k taken (23505), a commit frees it. One row
+# with k either way -- never two.
+psql_run "CREATE TABLE ud (k int UNIQUE, v text) USING pgcolumnar;"
+psql_run "INSERT INTO ud VALUES (5, 'a'), (6, 'b'), (7, 'c');"
+# race HOLD_SQL INSERT_SQL -> the inserter's state, after the holder has ended
+race() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+		-c "BEGIN; $1; SELECT pg_sleep(3); $2;" >/dev/null 2>&1 &
+	local holder=$!
+	sleep 1
+	local got; got="$(state "$3")"
+	wait "$holder"
+	echo "$got"
+}
+check "an insert of a key whose delete is uncommitted waits, and fails when the delete rolls back" \
+	"$(race "DELETE FROM ud WHERE k = 5" "ROLLBACK" "INSERT INTO ud VALUES (5, 'racer');")|$(q "SELECT count(*) || '|' || min(v) FROM ud WHERE k = 5")" \
+	"23505|1|a"
+check "and succeeds when the delete commits, leaving one row with the key" \
+	"$(race "DELETE FROM ud WHERE k = 6" "COMMIT" "INSERT INTO ud VALUES (6, 'racer');")|$(q "SELECT count(*) || '|' || min(v) FROM ud WHERE k = 6")" \
+	"ok|1|racer"
+check "an insert of a key an uncommitted UPDATE moved away fails when the update rolls back" \
+	"$(race "UPDATE ud SET k = 70 WHERE k = 7" "ROLLBACK" "INSERT INTO ud VALUES (7, 'racer');")|$(q "SELECT count(*) || '|' || min(v) FROM ud WHERE k = 7")" \
+	"23505|1|c"
+
+# ---- an index built after a delete serves an older snapshot that sees the row (#1341) -
+#
+# Session 1 holds a REPEATABLE READ snapshot from before a committed DELETE of row 4242;
+# then an index is built. Session 1 still sees row 4242, so an index scan must find it,
+# as on heap, which indexes rows not yet dead to every snapshot.
+psql_run "CREATE TABLE ib (id int, v int) USING pgcolumnar;"
+psql_run "INSERT INTO ib SELECT g, g FROM generate_series(1, 10000) g;"
+_ib_out="$PGC_WORKDIR/ib_rr.out"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq -v ON_ERROR_STOP=1 \
+	-c "BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM ib; SELECT pg_sleep(4);
+	    SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
+	    EXPLAIN (COSTS OFF) SELECT count(*) FROM ib WHERE id = 4242;
+	    SELECT 'rows:' || count(*) FROM ib WHERE id = 4242; COMMIT;" > "$_ib_out" 2>&1 &
+_ib_s1=$!
+sleep 1
+psql_run "DELETE FROM ib WHERE id = 4242;"
+psql_run "CREATE INDEX ib_id ON ib (id);"
+wait "$_ib_s1"
+check "premise: the index exists and is valid" \
+	"$(q "SELECT indisvalid FROM pg_index WHERE indexrelid = 'ib_id'::regclass")" "t"
+check "premise: the older snapshot's lookup is an index scan" \
+	"$(grep -cE 'Index (Only )?Scan using ib_id' "$_ib_out")" "1"
+check "an index built after a delete finds the row for an older snapshot that sees it" \
+	"$(sed -n 's/^rows://p' "$_ib_out")" "1"
+check "and a new snapshot does not see the deleted row by that index" \
+	"$(q "SET enable_seqscan = off; SET enable_bitmapscan = off; SELECT count(*) FROM ib WHERE id = 4242;" | tail -1)" "0"
+
+# The cost of indexing deleted rows, pinned: they go in as not alive, so a UNIQUE
+# index still builds over a key whose only other holder is a deleted row.
+psql_run "CREATE TABLE ibu (k int) USING pgcolumnar;"
+psql_run "INSERT INTO ibu VALUES (5), (6);"
+psql_run "DELETE FROM ibu WHERE k = 5;"
+psql_run "INSERT INTO ibu VALUES (5);"
+check "a unique index builds over a key whose other holder is a deleted row" \
+	"$(state "CREATE UNIQUE INDEX ibu_k ON ibu (k);")|$(q "SET enable_seqscan = off; SELECT count(*) FROM ibu WHERE k = 5;" | tail -1)" "ok|1"
+
+pgc_summary

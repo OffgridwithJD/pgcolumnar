@@ -42,6 +42,7 @@ SUITES=(
 	advisory_lock_class
 	alter_am_cleanup
 	alter_column_type
+	am_contracts
 	analyze_differential
 	analyze_function
 	analyze_reltuples

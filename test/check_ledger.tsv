@@ -1,3 +1,30 @@
+am_contracts	am_contracts	ON CONFLICT DO NOTHING skips the duplicate and inserts the new row	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	ON CONFLICT DO UPDATE is refused as unsupported (0A000), and changes nothing	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	ON CONFLICT DO UPDATE with no conflicting row inserts it	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	a DO NOTHING racing an uncommitted insert of the same key waits, then skips it	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	a TRUNCATE rolled back at transaction level restores every row	15;16;17;18;19	2026-10-14	TRUNCATE empties the old storage in place (RelationTruncate before the swap)
+am_contracts	am_contracts	a TRUNCATE rolled back to a savepoint restores every row, and the transaction goes on	15;16;17;18;19	2026-10-14	TRUNCATE empties the old storage in place (RelationTruncate before the swap)
+am_contracts	am_contracts	a key twice in one DO NOTHING statement is inserted once, the first time	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	a unique index builds over a key whose other holder is a deleted row	15;16;17;18;19	never	-
+am_contracts	am_contracts	an index built after a delete finds the row for an older snapshot that sees it	15;16;17;18;19	2026-10-14	the index build skips deleted rows, as before #1341
+am_contracts	am_contracts	an insert of a key an uncommitted UPDATE moved away fails when the update rolls back	15;16;17;18;19	2026-10-14	the dirty-snapshot index fetch answers an in-progress delete as final, as before #1341
+am_contracts	am_contracts	an insert of a key whose delete is uncommitted waits, and fails when the delete rolls back	15;16;17;18;19	2026-10-14	the dirty-snapshot index fetch answers an in-progress delete as final, as before #1341
+am_contracts	am_contracts	an outer delete survives an aborted inner block, as on heap	15;16;17;18;19	2026-10-14	ExecutorEnd flushes every subtransaction's buffers, as before #1341
+am_contracts	am_contracts	an outer insert survives an aborted inner block, as on heap	15;16;17;18;19	2026-10-14	ExecutorEnd flushes every subtransaction's buffers, as before #1341
+am_contracts	am_contracts	and a new snapshot does not see the deleted row by that index	15;16;17;18;19	never	-
+am_contracts	am_contracts	and so does ON CONFLICT (id) DO NOTHING, naming its arbiter	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	and succeeds when the delete commits, leaving one row with the key	15;16;17;18;19	2026-10-14	ExecutorEnd flushes no pending writes
+am_contracts	am_contracts	and the inner block's own rows are gone	15;16;17;18;19	never	-
+am_contracts	am_contracts	and the primary key still finds them by index	15;16;17;18;19	2026-10-14	TRUNCATE empties the old storage in place (RelationTruncate before the swap)
+am_contracts	am_contracts	and the primary key still refuses a duplicate of a restored row	15;16;17;18;19	2026-10-14	TRUNCATE empties the old storage in place (RelationTruncate before the swap)
+am_contracts	am_contracts	and the unique index answers the key with that one row	15;16;17;18;19	never	-
+am_contracts	am_contracts	premise: the conflict table holds ten rows	15;16;17;18;19	never	-
+am_contracts	am_contracts	premise: the index exists and is valid	15;16;17;18;19	never	-
+am_contracts	am_contracts	premise: the older snapshot's lookup is an index scan	15;16;17;18;19	never	-
+am_contracts	am_contracts	premise: the racing sessions contended for keys	15;16;17;18;19	never	-
+am_contracts	am_contracts	premise: the truncate table holds 5000 rows	15;16;17;18;19	never	-
+am_contracts	am_contracts	rows the parent buffered before a savepoint survive a TRUNCATE rolled back to it	15;16;17;18;19	2026-10-14	ExecutorEnd flushes no pending writes;TRUNCATE empties the old storage in place (RelationTruncate before the swap)
+am_contracts	am_contracts	sessions racing DO NOTHING on the same keys leave each key once, with no error	15;16;17;18;19	2026-10-14	a speculative row that lost the race is never withdrawn;speculative insert refused as unsupported, as before #1341
 analyze_stats	analyze_stats	ANALYZE now collects statistics at all	15;16;17;18;19	never	-
 analyze_stats	analyze_stats	ANALYZE on a wide table completes well inside its derived cap	15;16;17;18;19	never	-
 analyze_stats	analyze_stats	a fast machine still gets the floor, not a bound that shrinks with it	15;16;17;18;19	2026-09-24	the cap loses its absolute floor, so the bound shrinks with the machine it runs on;the floor moved by one, so the boundary where floor and derived bound meet is off by one

@@ -409,6 +409,31 @@ true until the next version shipped.
   only for a role the scan would admit, and gives everyone else the flat estimate, as the
   Parquet wrapper has since #330. `test/fdw_plan_privilege.sh` and
   `test_fdw_plan_privilege.py` pin both wrappers' gates.
+- **A plpgsql EXCEPTION block that rolls back no longer loses the enclosing statement's
+  rows (#1341).** A statement ending inside the block flushed every buffered write,
+  including the enclosing INSERT's or DELETE's, under the block's subtransaction; the
+  rollback then took them away. `INSERT INTO t SELECT f(g) FROM generate_series(1,
+  5000) g`, where `f`'s block wrote a columnar table and raised, kept 1 row. Now a
+  statement's end flushes only its own subtransaction's buffers. The same loss through a
+  READ of that table inside the block is #1360, not yet fixed.
+- **A unique index is no longer violated by an insert racing an uncommitted delete of
+  its key (#1341).** The index fetch answered a row whose delete was still in progress
+  as gone, so the uniqueness check did not wait; when the delete rolled back, the key had
+  two rows. It now reports the row present, as heap does, and the check waits.
+- **An index built after a DELETE serves a transaction whose snapshot began before it
+  (#1341).** The build left deleted rows out, so that transaction's index scan missed a
+  row its table scan returned. Deleted rows are now indexed as not alive, as heap indexes
+  a recently dead tuple; a UNIQUE index still builds over a key whose other holder was
+  deleted.
+- **`INSERT ... ON CONFLICT DO NOTHING` works on a columnar table with a unique index
+  (#1341).** It raised `0A000` ("speculative insert is not supported yet") on any table
+  with a primary key or unique index, which is every table it is used on.
+  `docs/limitations.md` said it worked. Speculative insertion now inserts the row as an
+  ordinary row, and withdraws it again (a delete mark) when a concurrent inserter won the
+  key. `ON CONFLICT DO UPDATE` still refuses when a row conflicts, because updating it
+  takes a row lock; with no conflict it inserts. Tested in `am_contracts`, in both
+  twins, including eight sessions racing on the same keys: 0 duplicate keys, against
+  407 to 507 with the withdrawal disabled.
 - Changing a text column's collation without a rewrite no longer gives wrong
   answers (#1327). `ALTER COLUMN ... TYPE text COLLATE <other>` keeps the
   table's files, so the zone maps kept minima and maxima ordered under the old
