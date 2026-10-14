@@ -83,11 +83,13 @@ check "premise: some rows are past the retention and some are not" \
 # The whole safety argument rests on this: a group that spans the cutoff exists,
 # so "drop every group with an expired row in it" and "drop every group whose
 # rows are all expired" give different answers on this fixture.
-STRADDLE_ROWS="$(q "SELECT count(*) FROM ttl_t
-                    WHERE ts >= ($CUTOFF) - make_interval(days => 1)
-                      AND ts <  ($CUTOFF) + make_interval(days => 1)")"
+# Each side counted on its own (#1339): one count over the two-day window was met by
+# rows on one side alone.
+STRADDLE_ROWS="$(q "SELECT count(*) FILTER (WHERE ts >= ($CUTOFF) - make_interval(days => 1) AND ts < ($CUTOFF))
+                    || '|' || count(*) FILTER (WHERE ts >= ($CUTOFF) AND ts < ($CUTOFF) + make_interval(days => 1))
+                    FROM ttl_t")"
 check "premise: rows exist on both sides of the cutoff within one day of it" \
-	"$([ "${STRADDLE_ROWS:-0}" -gt 0 ] && echo "straddled" || echo "NO STRADDLE")" "straddled"
+	"$(case "$STRADDLE_ROWS" in 0\|*|*\|0|'') echo "NO STRADDLE ($STRADDLE_ROWS)" ;; *) echo straddled ;; esac)" "straddled"
 
 # ---- declaring the retention ----------------------------------------------
 psql_run "SELECT pgcolumnar.set_options('ttl_t', ttl_column => 'ts',
@@ -152,14 +154,17 @@ check "premise: the table holds NULL retention rows at all" "$NULL_BEFORE" "10"
 # table-level count cannot see a row group, and passes just as readily on a
 # fixture where the NULL rows sit in a group of their own -- which is the
 # arrangement the premise exists to exclude. Count the groups that hold both.
+# And THAT group holds an expired row (#1339): counting groups with NULLs alone was
+# met by a group of nothing but NULLs. Rows are mapped to their group through
+# row_tid() over the group's row numbers.
 check "premise: and the SAME row group holds expired rows and NULL ones" \
-	"$(q "SELECT count(*) FROM (
-	        SELECT z.group_number
-	        FROM pgcolumnar.zone_map z
-	        JOIN pgcolumnar.storage s ON s.storage_id = z.storage_id
-	        WHERE s.relation_oid = 'ttl_null'::regclass
-	          AND z.null_count > 0
-	        GROUP BY z.group_number) g")" "1"
+	"$(q "WITH ng AS (SELECT DISTINCT z.storage_id, z.group_number
+	                  FROM pgcolumnar.zone_map z JOIN pgcolumnar.storage s ON s.storage_id = z.storage_id
+	                  WHERE s.relation_oid = 'ttl_null'::regclass AND z.null_count > 0)
+	      SELECT (SELECT count(*) FROM ng) || '|' ||
+	             (SELECT count(*) > 0 FROM ttl_null t WHERE t.ts < now() - interval '3 days'
+	                AND t.ctid IN (SELECT pgcolumnar.row_tid(n) FROM pgcolumnar.row_group rg JOIN ng USING (storage_id, group_number),
+	                                      generate_series(rg.first_row_number, rg.first_row_number + rg.row_count - 1) n))")" "1|true"
 NULL_RETIRED="$(q "SELECT pgcolumnar.expire('ttl_null')")"
 NULL_AFTER="$(q "SELECT count(*) FROM ttl_null WHERE ts IS NULL")"
 NULL_ROWS="$(q "SELECT count(*) FROM ttl_null")"
@@ -191,7 +196,7 @@ check "premise: an index-only scan is chosen on the all-visible table" \
 # enable_bitmapscan being off -- NOT by the visibility-map bit the fix clears.
 # Stop PgColumnarVMSetVisibleForRelation writing bits and the plan is unchanged,
 # so the arm above cannot fail for the thing under test. Assert the bit itself.
-check "premise: and VACUUM really did set visibility-map bits to clear" \
+check "and VACUUM really did set visibility-map bits to clear" \
 	"$(q "SELECT CASE WHEN relallvisible > 0 THEN 'set' ELSE 'none' END
 	      FROM pg_class WHERE oid = 'ttl_ios'::regclass")" "set"
 IOS_VM_BEFORE="$(q "SELECT relallvisible FROM pg_class WHERE oid = 'ttl_ios'::regclass")"
@@ -295,7 +300,7 @@ psql_run "DELETE FROM ttl_dn WHERE ts IS NULL;"
 
 check "premise: no LIVE row holds a NULL retention value any more" \
 	"$(q 'SELECT count(*) FROM ttl_dn WHERE ts IS NULL')" "0"
-check "premise: but the zone map still records the deleted NULLs" \
+check "but the zone map still records the deleted NULLs" \
 	"$(q "SELECT CASE WHEN sum(z.null_count) > 0 THEN 'still recorded' ELSE 'gone' END
 	      FROM pgcolumnar.zone_map z
 	      JOIN pgcolumnar.storage s ON s.storage_id = z.storage_id
@@ -432,8 +437,18 @@ qz() {  # qz ZONE SQL
 		-c "SET TimeZone = '$1'; $2" 2>&1 | tail -1
 }
 
-for _tz in UTC Pacific/Midway; do
-	_t="ttl_tz_$(printf '%s' "$_tz" | tr -c 'A-Za-z0-9' '_')"
+# THE SECOND ZONE IS CHOSEN SO ITS DATE IS NOT UTC'S (#1339). Midway alone had
+# UTC's date from 11:00 UTC on, and an expire that ignored the session zone passed
+# there for half of every day. Midway is a day behind before 11:00 UTC, Kiritimati
+# a day ahead from 10:00 UTC, so one of them always differs. The arms name the zone
+# by what it is, not which it is, so their ledger keys do not move with the clock.
+_other="$(q "SELECT CASE WHEN extract(hour FROM now() AT TIME ZONE 'UTC') < 11
+                         THEN 'Pacific/Midway' ELSE 'Pacific/Kiritimati' END;")"
+check "premise: the second zone's date is not UTC's right now" \
+	"$(q "SELECT ((now() AT TIME ZONE '$_other')::date <> (now() AT TIME ZONE 'UTC')::date)::text;")" "true"
+for _tz in UTC "$_other"; do
+	_lbl="UTC"; [ "$_tz" = UTC ] || _lbl="a zone on another date"
+	_t="ttl_tz_$(printf '%s' "$_lbl" | tr -c 'A-Za-z0-9' '_')"
 	psql_run "DROP TABLE IF EXISTS $_t;
 	          CREATE TABLE $_t (id int, d date, v text) USING pgcolumnar;"
 	psql_run "INSERT INTO $_t
@@ -451,7 +466,7 @@ for _tz in UTC Pacific/Midway; do
 	_below="$(qz "$_tz" "SELECT count(*) FROM $_t WHERE d < DATE '$_cut'")"
 	echo "-- tz $_tz: cutoff $_cut, $_before rows -> $_after, retired $_ret group(s)"
 
-	check "premise: in $_tz the fixture straddles that session's cutoff" \
+	check "premise: in $_lbl the fixture straddles that session's cutoff" \
 		"$([ "${_want:-0}" -gt 0 ] && [ "${_want:-0}" -lt "${_before:-0}" ] && echo straddles \
 		   || echo "want $_want of $_before")" \
 		"straddles"
@@ -478,14 +493,32 @@ for _tz in UTC Pacific/Midway; do
 	# gate refuses that for exactly the reason the arm exists: a red in one zone
 	# would be recorded against the other. The gate caught it on the first push,
 	# on both majors, while all 256 suites reported PASS.
-	check "premise: one date per row group in $_tz, so no group straddles the cutoff" \
+	check "premise: one date per row group in $_lbl, so no group straddles the cutoff" \
 		"$([ "${_gr:-0}" = "${_days:-x}" ] && [ "${_perday:-0}" = "1000" ] && echo "one per group" \
 		   || echo "$_gr groups, $_days dates, rows per date [$_perday]")" \
 		"one per group"
-	check "expire in $_tz keeps exactly the rows at or after that session's cutoff" \
+	check "expire in $_lbl keeps exactly the rows at or after that session's cutoff" \
 		"$_after" "$_want"
-	check "and no row older than $_tz's own cutoff survives" "$_below" "0"
+	check "and no row older than $_lbl's own cutoff survives" "$_below" "0"
 done
+
+# ---- a timestamp retention column: the cutoff is the session's LOCAL time (#1339) --
+# A `timestamp` column has no zone, so expire computes its cutoff from the session's
+# local now. Nothing tested that type at all. In Kiritimati, UTC+14, the local cutoff
+# and a UTC one are fourteen hours apart. 6,000 rows 36 s apart are six groups of ten
+# hours, starting 40 hours before the local cutoff: four groups lie wholly before it
+# and go, the fifth holds it and stays. A cutoff taken in UTC would sit 26 hours in
+# and retire two.
+psql_run "CREATE TABLE ttl_lt (id int, ts timestamp, v text) USING pgcolumnar;"
+qz Pacific/Kiritimati "INSERT INTO ttl_lt SELECT g, localtimestamp - interval '2 days' - interval '40 hours'
+                         + (g - 1) * interval '36 s', 'v' || g FROM generate_series(1, 6000) g;" >/dev/null
+psql_run "SELECT pgcolumnar.set_options('ttl_lt', ttl_column => 'ts', ttl_interval => '2 days');"
+check "premise: the timestamp fixture is six groups of 1,000 rows" \
+	"$(q "SELECT count(*) FROM pgcolumnar.row_group rg JOIN pgcolumnar.storage s USING (storage_id)
+	      WHERE s.relation_oid = 'ttl_lt'::regclass;")" "6"
+qz Pacific/Kiritimati "SELECT pgcolumnar.expire('ttl_lt')" >/dev/null
+check "expire on a timestamp column retires the groups wholly before the session's local cutoff" \
+	"$(q "SELECT count(*) || '|' || min(id) FROM ttl_lt;")" "2000|4001"
 
 # ---- expire records what it retires, for rollups that keep history (#1294) ----
 # An incremental rollup keeps its buckets when retention drops their raw rows (the
@@ -559,7 +592,7 @@ psql_run "CREATE TABLE ttl_y (ts timestamptz, v int) USING pgcolumnar;
 	INSERT INTO ttl_y SELECT now() + g * interval '1 second', g FROM generate_series(1, 2000) g;"
 _ysid="$(q "SELECT pgcolumnar.get_storage_id('ttl_y');")"
 _y_without="$(_expire_scans ttl_y "DELETE FROM pgcolumnar.column_extent WHERE storage_id = $_ysid" | sed 's/ scans=.*//')"
-check "premise: without the extent, expire retires the aged groups" "$_y_without" "n=3"
+check "without the extent, expire retires the aged groups" "$_y_without" "n=3"
 check "with the extent, expire retires the same groups" "$(_expire_scans ttl_y | sed 's/ scans=.*//')" "$_y_without"
 
 # Old rows written earlier in expire's own transaction: their groups are visible to
@@ -577,7 +610,7 @@ psql_run "CREATE TABLE ttl_n (ts timestamptz, v int) USING pgcolumnar;
 	SELECT pgcolumnar.set_options('ttl_n', ttl_column => 'ts', ttl_interval => '2 days');
 	INSERT INTO ttl_n SELECT now() - interval '9 days' + g * interval '1 second', g FROM generate_series(1, 2000) g;
 	INSERT INTO ttl_n SELECT NULL, g FROM generate_series(1, 4000) g;"
-check_num "premise: expire retires the aged groups and keeps those of NULLs" \
+check_num "expire retires the aged groups and keeps those of NULLs" \
 	"$(q "SELECT pgcolumnar.expire('ttl_n');")" "2"
 check "a later expire on a column of only NULLs reads no zone map" "$(_expire_scans ttl_n)" "n=0 scans=0"
 
