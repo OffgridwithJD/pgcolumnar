@@ -1832,4 +1832,19 @@ suites_not_covered 246
 #     never         1798 - 2 = 1796
 #     dated          545 + 2 =  547
 #     1796 + 547 == 2343
-checks_never_observed_red 1796
+#
+# #1341, the rollup catalogs' write side and the definer helpers (OffgridwithJD):
+# 1796 -> 1798. Six new rollup checks. Four are dated by a mutation of the extension
+# script that main's suite survives:
+#   - each helper's require_caller_select deleted (one arm each);
+#   - WITH CHECK (true) on the catalog policies (the INSERT arm, and the write arm,
+#     which counts the inserted row);
+#   - a permissive UPDATE and DELETE policy USING (true) (the write arm).
+# The premise that the owner's rollup has group rows, and the owner's own call
+# through the helpers, arrive never. Five-major runs: rollup 78/78 on 15-19.
+#
+#     ledger rows   2343 + 6 = 2349
+#     never         1796 + 2 = 1798
+#     dated          547 + 4 =  551
+#     1798 + 551 == 2349
+checks_never_observed_red 1798

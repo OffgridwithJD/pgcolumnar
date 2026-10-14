@@ -459,6 +459,34 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                 _one(conn, f"SELECT string_agg(b || ':' || n || ':' || m, ' ' ORDER BY b) FROM"
                            f" (SELECT date_bin('1 day', at, '{ORIGIN}') b, count(*) n, max(kwh) m FROM meter GROUP BY 1) x"),
                 "and reads what a recompute gives")
+    # THE WRITE SIDE AND THE DEFINER HELPERS (#1341). The policies have USING only,
+    # so they also check an INSERT's new row; an UPDATE or DELETE with no WHERE reads
+    # nothing, so only the policy's USING keeps it off another owner's rows. Asked
+    # before the read-side arms, so a write that got through is what fails.
+    rg_sql = "SELECT count(*) FROM pgcolumnar.rollup_group WHERE rollup = 'meter_daily'::regclass"
+    rg_own = _one(conn, rg_sql)
+    expect.text("some" if rg_own > 0 else f"none ({rg_own})", "some",
+                "premise: the owner's rollup has group rows another role could reach")
+    expect.text(as_role("rp_other", "INSERT INTO pgcolumnar.rollup_group VALUES"
+                                    " ('public.meter_daily'::regclass, 999999, 1, 0, NULL, NULL, false)"),
+                "42501", "another role cannot add a group row to the owner's rollup (42501)")
+    as_role("rp_other", "UPDATE pgcolumnar.rollup SET history_has_null = true")
+    as_role("rp_other", "DELETE FROM pgcolumnar.rollup_group")
+    has_null = _one(conn, "SELECT history_has_null FROM pgcolumnar.rollup"
+                          " WHERE rollup = 'meter_daily'::regclass")
+    expect.text(f"{has_null}|{_one(conn, rg_sql)}", f"False|{rg_own}",
+                "and its unqualified UPDATE and DELETE reach none of the owner's catalog rows")
+    # rollup_source_groups and rollup_source_retired run as their definer, so the
+    # catalogs they read refuse no one; the caller's SELECT on the source is checked
+    # by require_caller_select against the OUTER user.
+    own_groups = as_role("rp_owner", "SELECT (count(*) > 0)::text FROM pgcolumnar.rollup_source_groups('meter')")
+    own_retired = as_role("rp_owner", "SELECT count(*) >= 0 FROM pgcolumnar.rollup_source_retired('meter')")
+    expect.text(f"{own_groups}|{own_retired}", "true|True",
+                "the owner reads its source's groups through the definer helpers")
+    expect.text(as_role("rp_other", "SELECT count(*) FROM pgcolumnar.rollup_source_groups('public.meter')"), "42501",
+                "another role cannot read the source's groups through rollup_source_groups (42501)")
+    expect.text(as_role("rp_other", "SELECT count(*) FROM pgcolumnar.rollup_source_retired('public.meter')"), "42501",
+                "nor its retired groups through rollup_source_retired (42501)")
     expect.text(f"{as_role('rp_other', 'SELECT count(*) FROM pgcolumnar.rollup')} "
                 f"{as_role('rp_other', 'SELECT count(*) FROM pgcolumnar.rollup_group')}", "0 0",
                 "another role sees none of its rollup catalog rows")
