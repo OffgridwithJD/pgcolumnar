@@ -2049,4 +2049,16 @@ suites_not_covered 241
 #     never         1962 + 3 = 1965
 #     dated          587 + 1 = 588
 #     1965 + 588 == 2553
-checks_never_observed_red 1965
+#
+# #1370 review (OffgridwithJD): 1965 -> 1962. The two set_options checks lose the
+# premise prefix and are dated, with the interval-only expire arm:
+#   - set_options refusing a half declaration reddens both set_options checks, while
+#     the expire arms stay green for an unrelated reason;
+#   - the retention reader without its column test crashed the backend on the
+#     interval-only table, so that arm now runs last in the suite.
+#
+#     ledger rows   2553     = 2553
+#     never         1965 - 3 = 1962
+#     dated          588 + 3 = 591
+#     1962 + 591 == 2553
+checks_never_observed_red 1962
