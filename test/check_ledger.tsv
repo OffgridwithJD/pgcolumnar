@@ -1949,12 +1949,12 @@ native_agg	native_agg	min(ts) reads under a tenth of the blocks a decode of ts r
 native_agg	native_agg	multi-agg	15;16;17;18;19	never	-
 native_agg	native_agg	multi-agg beats a parallel plan	15;16;17;18;19	never	-
 native_agg	native_agg	multi-agg plan has no Gather	15;16;17;18;19	never	-
-native_agg	native_agg	premise: the deletes removed rows at both ends, the same rows from each	15;16;17;18;19	never	-
 native_agg	native_agg	premise: the timestamptz table holds every row inserted	15;16;17;18;19	never	-
 native_agg	native_agg	sum(bigint) fallback parity	15;16;17;18;19	never	-
 native_agg	native_agg	sum(int4)	15;16;17;18;19	never	-
 native_agg	native_agg	sum(int4,nulls)	15;16;17;18;19	never	-
 native_agg	native_agg	sum/min/max uses the metadata agg node	15;16;17;18;19	never	-
+native_agg	native_agg	the deletes removed rows at both ends, the same rows from each	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	a sequential scan of the same poisoned chunk is refused (XX001)	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	an index fetch of a chunk whose page_length is 2^32 too large is refused (XX001)	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	backend survived the sequential refusal	15;16;17;18;19	never	-
