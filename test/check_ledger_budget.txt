@@ -2226,4 +2226,19 @@ suites_not_covered 234
 #     never         2086 + 1 = 2087
 #     dated          658 + 7 =  665
 #     2087 + 665 == 2752
-checks_never_observed_red 2087
+#
+# #1377, a rollup's definition survives a dump and restore, and refresh refuses a
+# restored source by its OID: 2041 -> 2047. The rollup suite gains 13 checks from
+# five-major runs (95/95 on each of 15-19). Seven are dated on PG17:
+#   - the tree before #1377 (pgcolumnar.rollup not dumped, no source_oid): the
+#     definition arm, both refusal arms, the HINT arm, the rebase and append arms
+#     and the final recompute arm go red;
+#   - refresh_rollup without the source_oid check: both refusal arms, the HINT arm
+#     and the final recompute arm go red, the restored rows folded twice.
+# The other six, the fixture's dump and restores, arrive never.
+#
+#     ledger rows   2752 + 13 = 2765
+#     never         2087 +  6 = 2093
+#     dated          665 +  7 = 672
+#     2093 + 672 == 2765
+checks_never_observed_red 2093
