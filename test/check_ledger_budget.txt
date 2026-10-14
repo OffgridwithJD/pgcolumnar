@@ -2027,4 +2027,14 @@ suites_not_covered 241
 #     never         1928 + 35 = 1963
 #     dated          585 +  1 = 586
 #     1963 + 586 == 2549
-checks_never_observed_red 1963
+#
+# #1374 review (OffgridwithJD): 1963 -> 1962. "ten row groups, every one half deleted" loses
+# the premise prefix and now checks each group (500 live and 500 deleted in every one),
+# as its name says. The write state ignoring stripe_row_limit reddens it (one group)
+# and dates it. Five-major runs: native_reclaim 36/36 on 15-19.
+#
+#     ledger rows   2549     = 2549
+#     never         1963 - 1 = 1962
+#     dated          586 + 1 = 587
+#     1962 + 587 == 2549
+checks_never_observed_red 1962
