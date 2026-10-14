@@ -1970,6 +1970,42 @@ native_join_vector_agg	native_join_vector_agg	unique join fold answer equals GUC
 native_join_vector_agg	native_join_vector_agg	unique join fold answer equals heap	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	unique join uses core Agg when GUC off	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	unique join uses vectorized agg when GUC on	15;16;17;18;19	2026-09-12	drop JOINREL fold
+native_reclaim	native_reclaim	and every live row is still there, once	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	compact_rewrite ACCEPTS the boundary threshold 0.0	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	compact_rewrite ACCEPTS the boundary threshold 1.0	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	compact_rewrite rejects a NaN threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	compact_rewrite rejects a negative threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	compact_rewrite rejects a threshold above 1 with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	compact_rewrite with max_groups 3 rewrites three, then an uncapped call the other seven	15;16;17;18;19	2026-10-14	compact_rewrite ignoring max_groups
+native_reclaim	native_reclaim	control: a missing function is 42883, not the guard's 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	control: a null table name is 22004, not 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	control: a wrong-arity compact_rewrite is 42883, not 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	control: division by zero is 22012, not 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	data correct after delete + compact_rewrite + recluster	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	data intact after first recluster	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	free space is being reused (bounded, not growing per cycle)	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	free space recorded after first recluster	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	initial data present	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due ACCEPTS its own defaults	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due ACCEPTS the boundary thresholds 0.0, 0.0	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due ACCEPTS the boundary thresholds 1.0, 1.0	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a NULL compact threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a NULL recluster threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a NaN compact threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a NaN recluster threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a compact threshold above 1 with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a negative compact threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a negative recluster threshold with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due rejects a recluster threshold above 1 with 22023	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due(0.2) on a 50%-deleted table is still due	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	maintenance_due(0.6) on a 50%-deleted table is not due	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	no free space yet	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	premise: 10000 of nd's rows are deleted	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	premise: nd holds 20000 rows	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	premise: ten row groups, every one half deleted	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	repeated recluster reuses space (file plateaus)	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	reused-block data matches heap mirror	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	row count correct after cycle	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	a mapping with an access key and no secret is refused before any request (28000)	15;16;17;18;19	2026-10-14	the user-mapping credential pairing check removed (an access key alone crashes the backend)
 objstore_credentials	objstore_credentials	ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	ambient: a superuser with no mapping reads via the environment	15;16;17;18;19	never	-

@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 242
+suites_not_covered 241
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2016,4 +2016,15 @@ suites_not_covered 242
 #     never         1930 - 2     = 1928
 #     dated          583 + 2     = 585
 #     1928 + 585 == 2513
-checks_never_observed_red 1928
+#
+# #1341, native_reclaim seeded, with the max_groups arm (OffgridwithJD): 1928 -> 1963,
+# and suites_not_covered 242 -> 241. The suite had no rows. It enters with all 36
+# checks from five-major runs (36/36 on each of 15-19). One is dated by
+# compact_rewrite ignoring max_groups: the capped call rewrote all ten groups
+# (10|0|0 against 3|7|0). The other 35 arrive never.
+#
+#     ledger rows   2513 + 36 = 2549
+#     never         1928 + 35 = 1963
+#     dated          585 +  1 = 586
+#     1963 + 586 == 2549
+checks_never_observed_red 1963
