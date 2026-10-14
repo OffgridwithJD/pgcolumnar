@@ -663,4 +663,6 @@ guard_tests 433
 # the cluster files on this tree.
 # cluster_tests 562 -> 563 for #1376's test_a_rollup_and_its_source_are_dropped_together in
 # test_rollup.py, by collection over the cluster files on this tree.
-cluster_tests 563
+# cluster_tests 563 -> 564 for #1377's test_rollup_dump_and_restore in test_rollup.py,
+# by collection over the cluster files on this tree.
+cluster_tests 564
