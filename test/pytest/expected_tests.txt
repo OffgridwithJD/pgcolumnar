@@ -649,4 +649,6 @@ guard_tests 433
 # test/fdw_plan_privilege.sh, by collection over the cluster files on this branch.
 # cluster_tests 543 -> 549 for #1341's test_arrow_import.py, the twin of arrow_import.sh:
 # six tests, by collection over the cluster files on this tree.
-cluster_tests 549
+# cluster_tests 549 -> 550 for #1341's test_a_half_declaration_is_no_retention in
+# test_ttl_expire.py, by collection over the cluster files on this tree.
+cluster_tests 550

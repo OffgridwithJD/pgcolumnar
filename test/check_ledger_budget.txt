@@ -2037,4 +2037,28 @@ suites_not_covered 241
 #     never         1963 - 1 = 1962
 #     dated          586 + 1 = 587
 #     1962 + 587 == 2549
+#
+# #1341, half a retention declaration is no retention (OffgridwithJD): 1962 -> 1965.
+# Four new ttl_expire checks. The column-only arm is dated by a reader that fills a
+# missing interval with zero: expire then retired all 3000 aged rows instead of
+# refusing. Three arrive never: two premises on what set_options accepts, and the
+# interval-only arm, which no non-crashing mutation reaches (a column filled in
+# would name a column that does not exist). Five-major runs: 74/74 on 15-19.
+#
+#     ledger rows   2549 + 4 = 2553
+#     never         1962 + 3 = 1965
+#     dated          587 + 1 = 588
+#     1965 + 588 == 2553
+#
+# #1370 review (OffgridwithJD): 1965 -> 1962. The two set_options checks lose the
+# premise prefix and are dated, with the interval-only expire arm:
+#   - set_options refusing a half declaration reddens both set_options checks, while
+#     the expire arms stay green for an unrelated reason;
+#   - the retention reader without its column test crashed the backend on the
+#     interval-only table, so that arm now runs last in the suite.
+#
+#     ledger rows   2553     = 2553
+#     never         1965 - 3 = 1962
+#     dated          588 + 3 = 591
+#     1962 + 591 == 2553
 checks_never_observed_red 1962

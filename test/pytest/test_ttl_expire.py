@@ -464,6 +464,35 @@ def test_expire_refuses_what_it_cannot_honour(pgc_conn, expect):
                 "expire refuses a retention column that no longer exists (42703)")
 
 
+def test_a_half_declaration_is_no_retention(pgc_conn, expect):
+    """A column with no interval names nothing to compare against, and an interval
+    with no column has nothing to compare: either alone reads as "no retention", so
+    a half declaration cannot drop rows (#1341). Every row is ten days old, so a
+    reader that filled in the missing half with a default would retire them all."""
+    with pgc_conn.cursor() as cur:
+        for t in ("ttl_hcol", "ttl_hiv"):
+            cur.execute(f"CREATE TABLE {t} (id int, ts timestamptz) USING pgcolumnar")
+            cur.execute(f"SELECT pgcolumnar.set_options('{t}', stripe_row_limit => 1000)")
+            cur.execute(f"INSERT INTO {t} SELECT g, now() - interval '10 days' FROM generate_series(1, 3000) g")
+
+    def declared(t):
+        return _one(pgc_conn, "SELECT coalesce(ttl_column::text, '-') || '|' || coalesce(ttl_interval::text, '-')"
+                              " FROM pgcolumnar.options WHERE regclass = %s::regclass", (t,))
+
+    col_state = _sqlstate(pgc_conn, "SELECT pgcolumnar.set_options('ttl_hcol', ttl_column => 'ts')")
+    expect.text(f"{col_state}|{declared('ttl_hcol')}", "|ts|-",
+                "set_options takes a retention column without an interval")
+    iv_state = _sqlstate(pgc_conn, "SELECT pgcolumnar.set_options('ttl_hiv', ttl_interval => '1 day')")
+    expect.text(f"{iv_state}|{declared('ttl_hiv')}", "|-|1 day",
+                "and an interval without a column")
+    hcol = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_hcol')")
+    expect.text(f"{hcol}|{_one(pgc_conn, 'SELECT count(*) FROM ttl_hcol')}", "55000|3000",
+                "a retention column without an interval is no retention: refused (55000), every row kept")
+    hiv = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_hiv')")
+    expect.text(f"{hiv}|{_one(pgc_conn, 'SELECT count(*) FROM ttl_hiv')}", "55000|3000",
+                "and an interval without a column is no retention either")
+
+
 def test_a_deleted_null_stops_pinning_its_group(pgc_conn, expect):
     """`null_count` is recorded at WRITE time and never revised.
 

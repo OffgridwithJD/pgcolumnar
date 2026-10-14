@@ -2453,12 +2453,15 @@ ttl_expire	ttl_expire	a group whose only NULLs have been deleted is retired	15;1
 ttl_expire	ttl_expire	a later expire on a column of only NULLs reads no zone map	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310);the early exit not taken for a column with no value
 ttl_expire	ttl_expire	a negative ttl_interval is refused with 22023	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a no-op expire reads no zone map when the extent's minimum is past the cutoff	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310)
+ttl_expire	ttl_expire	a retention column without an interval is no retention: refused (55000), every row kept	15;16;17;18;19	2026-10-14	a retention column with no interval read as retention with a zero interval
 ttl_expire	ttl_expire	a role that does not own the table cannot expire it, even holding DELETE (42501)	15;16;17;18;19	2026-10-14	expire without its owner check
 ttl_expire	ttl_expire	a rolled-back expire records nothing	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a row dated exactly on the cutoff is kept, so truncation errs toward keeping	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a table with no declared retention is an error, not a silent success	15;16;17;18;19	2026-10-14	the no-retention refusal raised as XX000 rather than 55000
 ttl_expire	ttl_expire	and VACUUM really did set visibility-map bits to clear	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	and a zero ttl_interval is refused too	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	and an interval without a column	15;16;17;18;19	2026-10-14	set_options refuses a half retention declaration
+ttl_expire	ttl_expire	and an interval without a column is no retention either	15;16;17;18;19	2026-10-14	the retention reader drops its column test, so an interval alone is read (the backend then crashed)
 ttl_expire	ttl_expire	and its rows are gone	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	and no row older than UTC's own cutoff survives	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
 ttl_expire	ttl_expire	and no row older than a zone on another date's own cutoff survives	15;16;17;18;19	2026-10-14	expire's date cutoff taken from the UTC wall clock, not the session's date;the early exit compares the extent's maximum to the cutoff instead of its minimum
@@ -2517,6 +2520,7 @@ ttl_expire	ttl_expire	premise: the timestamp fixture is six groups of 1,000 rows
 ttl_expire	ttl_expire	running it again retires nothing, because nothing new expired	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	seqscan agrees the expired rows are gone	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	set_options accepts an int retention column, so the refusal is expire's	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	set_options takes a retention column without an interval	15;16;17;18;19	2026-10-14	set_options refuses a half retention declaration
 ttl_expire	ttl_expire	the index-only scan is still the plan after expire	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	the retention is recorded where the other options live	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	with the extent, expire retires the same groups	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum

@@ -311,6 +311,27 @@ check "premise: the declaration still names the dropped column" \
 check "expire refuses a retention column that no longer exists (42703)" \
 	"$(ttl_state "SELECT pgcolumnar.expire('ttl_gone');")|$(q 'SELECT count(*) FROM ttl_gone')" "42703|3000"
 
+# ---- half a declaration is no retention (#1341) -----------------------------
+#
+# A column with no interval names nothing to compare against, and an interval
+# with no column has nothing to compare: either alone reads as "no retention", so
+# a half declaration cannot drop rows. Every row here is ten days old, so a reader
+# that filled in the missing half with a default would retire them all.
+for _t in ttl_hcol ttl_hiv; do
+	psql_run "CREATE TABLE $_t (id int, ts timestamptz) USING pgcolumnar;
+	          SELECT pgcolumnar.set_options('$_t', stripe_row_limit => 1000);
+	          INSERT INTO $_t SELECT g, now() - interval '10 days' FROM generate_series(1, 3000) g;"
+done
+# Checks, not premises (#1236; #1370 review): set_options refusing a half declaration
+# is a change to this repository's SQL, and it turns both red while the expire arms
+# below stay green for an unrelated reason, so they are what notices it.
+check "set_options takes a retention column without an interval" \
+	"$(ttl_state "SELECT pgcolumnar.set_options('ttl_hcol', ttl_column => 'ts');")|$(q "SELECT coalesce(ttl_column::text, '-') || '|' || coalesce(ttl_interval::text, '-') FROM pgcolumnar.options WHERE regclass = 'ttl_hcol'::regclass;")" "|ts|-"
+check "and an interval without a column" \
+	"$(ttl_state "SELECT pgcolumnar.set_options('ttl_hiv', ttl_interval => '1 day');")|$(q "SELECT coalesce(ttl_column::text, '-') || '|' || coalesce(ttl_interval::text, '-') FROM pgcolumnar.options WHERE regclass = 'ttl_hiv'::regclass;")" "|-|1 day"
+check "a retention column without an interval is no retention: refused (55000), every row kept" \
+	"$(ttl_state "SELECT pgcolumnar.expire('ttl_hcol');")|$(q 'SELECT count(*) FROM ttl_hcol')" "55000|3000"
+
 # ---- a NULL that has been DELETED must stop pinning its group ---------------
 #
 # z->nullCount is recorded at WRITE time and never revised, so it still counts
@@ -666,5 +687,11 @@ psql_run "CREATE TABLE ttl_n (ts timestamptz, v int) USING pgcolumnar;
 check_num "expire retires the aged groups and keeps those of NULLs" \
 	"$(q "SELECT pgcolumnar.expire('ttl_n');")" "2"
 check "a later expire on a column of only NULLs reads no zone map" "$(_expire_scans ttl_n)" "n=0 scans=0"
+
+# The interval-only half (#1341), LAST IN THE SUITE ON PURPOSE: with the reader's
+# column test removed, expire on ttl_hiv crashed the backend (PG17), and a crash
+# mid-suite takes the checks after it down with it, premises included.
+check "and an interval without a column is no retention either" \
+	"$(ttl_state "SELECT pgcolumnar.expire('ttl_hiv');")|$(q 'SELECT count(*) FROM ttl_hiv')" "55000|3000"
 
 pgc_summary
