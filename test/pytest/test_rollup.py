@@ -549,3 +549,118 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                 "rebase_rollup of a table that is not a rollup is refused (42704)")
     expect.num(_one(conn, "SELECT count(*) FROM pg_class WHERE relname IN ('q_m', 'q_p', 'q_l', 'q_c', 'q_s', 'q_t', 'q_g', 'q_f')"), 0,
                "and no refused rollup left a table behind")
+
+
+def test_a_rollup_and_its_source_are_dropped_together(pgc_conn, pgc_cluster, expect):
+    """The catalog held the source and the view as bare OIDs (#1376). DROP TABLE of the
+    source succeeded and left the rollup unrefreshable for good (42P01 on the dead OID,
+    or a reused OID folded silently); DROP VIEW left the partials table and the catalog
+    rows behind. Now the view depends on the source as a view over it would, so the drop
+    is refused and CASCADE takes the rollup; and dropping the view takes the rest of it."""
+    conn = pgc_conn
+
+    def ddl(sql):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate or "?"
+
+    def left(oid, name):
+        return _one(conn, f"SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('{name}', '{name}__partials'))"
+                          f" || '|' || (SELECT count(*) FROM pgcolumnar.rollup WHERE rollup::oid = {oid})"
+                          f" || '|' || (SELECT count(*) FROM pgcolumnar.rollup_group WHERE rollup::oid = {oid})")
+
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE lsrc (ts timestamptz, v int) USING pgcolumnar")
+        cur.execute(f"INSERT INTO lsrc SELECT '{ORIGIN}'::timestamptz + g * interval '7 minutes', g"
+                    " FROM generate_series(1, 500) g")
+        for lr in ("lr_a", "lr_b"):
+            cur.execute(f"SELECT pgcolumnar.create_rollup('{lr}', 'lsrc', 'ts', '1 hour', '{ORIGIN}',"
+                        " '{}', '{count}', '{*}')")
+            cur.execute(f"SELECT pgcolumnar.refresh_rollup('{lr}')")
+    a_oid = _one(conn, "SELECT 'lr_a'::regclass::oid")
+    b_oid = _one(conn, "SELECT 'lr_b'::regclass::oid")
+
+    sums = _one(conn, "SELECT (SELECT sum(count) FROM lr_a) || '|' || (SELECT sum(count) FROM lr_b)")
+    a_parts = "|".join(left(a_oid, "lr_a").split("|")[:2])
+    expect.text(f"{sums}|{a_parts}", "500|500|2|1",
+                "both rollups over the source refreshed, so each has a view, partials and catalog rows")
+    expect.text(f"{ddl('DROP VIEW lr_b')}|{left(b_oid, 'lr_b')}", "ok|0|0|0",
+                "DROP VIEW of a rollup takes its partials and its catalog rows with it (#1376)")
+    expect.text(f"{ddl('DROP TABLE lsrc')}|{_one(conn, 'SELECT count(*) FROM pg_class WHERE relname = ' + chr(39) + 'lsrc' + chr(39))}",
+                "2BP01|1", "DROP TABLE of a rollup's source is refused while the rollup exists (2BP01, #1376)")
+    expect.text(f"{ddl('DROP TABLE lsrc CASCADE')}|{left(a_oid, 'lr_a')}", "ok|0|0|0",
+                "and DROP TABLE ... CASCADE takes the rollup's view, partials and catalog rows with it (#1376)")
+
+    # The trigger that records those dependencies writes to pg_depend for whoever writes
+    # a rollup row, and the catalog's row-level security only asks that they own the
+    # view. So it asks what a view over the source would: SELECT on the source.
+    schema = _one(conn, "SELECT current_schema()")
+    with conn.cursor() as cur:
+        cur.execute("DO $$ BEGIN CREATE ROLE lr_stranger_py LOGIN; "
+                    "EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+        cur.execute(f'GRANT USAGE, CREATE ON SCHEMA "{schema}" TO lr_stranger_py')
+        cur.execute("GRANT USAGE ON SCHEMA pgcolumnar TO lr_stranger_py")
+        cur.execute("CREATE TABLE lr_victim (ts timestamptz, v int) USING pgcolumnar")
+        cur.execute("REVOKE ALL ON lr_victim FROM PUBLIC")
+    db = _one(conn, "SELECT current_database()")
+    try:
+        with psycopg.connect(f"host=127.0.0.1 port={pgc_cluster.port} user=lr_stranger_py dbname={db}",
+                             autocommit=False) as c:
+            c.execute(f'SET search_path TO "{schema}", public')
+            c.execute("CREATE TABLE lr_mine (bucket timestamptz) USING pgcolumnar")
+            c.execute("CREATE VIEW lr_my_view AS SELECT bucket FROM lr_mine")
+            c.execute("INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column,"
+                      " width, origin, group_by, agg_functions, agg_columns) VALUES ('lr_my_view', 'lr_mine',"
+                      f" 'lr_victim', 0, 'ts', '1 hour', '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')")
+            c.commit()
+        tie = "ok"
+    except psycopg.Error as e:
+        tie = e.sqlstate or "?"
+    expect.text(f"{tie}|{ddl('DROP TABLE lr_victim')}", "42501|ok",
+                "a role cannot tie a rollup row to a table it cannot read (42501, #1376)")
+
+    # The partials go with the view by an AUTO dependency, and a drop deletes AUTO
+    # dependents with no ownership check. So the trigger requires the writer to own
+    # the partials too, and the rollup to be a view and the partials a table.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE lr_others (bucket timestamptz) USING pgcolumnar")
+        cur.execute("GRANT SELECT ON lr_others TO lr_stranger_py")
+        cur.execute("CREATE TABLE lr_src2 (ts timestamptz, v int) USING pgcolumnar")
+        cur.execute("GRANT SELECT ON lr_src2 TO lr_stranger_py")
+
+    def row(view, partials):
+        return ("INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width,"
+                f" origin, group_by, agg_functions, agg_columns) VALUES ('{view}', '{partials}', 'lr_src2', 0,"
+                f" 'ts', '1 hour', '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')")
+
+    def as_stranger(*stmts):
+        try:
+            with psycopg.connect(f"host=127.0.0.1 port={pgc_cluster.port} user=lr_stranger_py dbname={db}",
+                                 autocommit=False) as c:
+                c.execute(f'SET search_path TO "{schema}", public')
+                for st in stmts:
+                    c.execute(st)
+                c.commit()
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate or "?"
+
+    named = as_stranger("CREATE TABLE lr_p2 (bucket timestamptz) USING pgcolumnar",
+                        "CREATE VIEW lr_v2 AS SELECT bucket FROM lr_p2", row("lr_v2", "lr_others"))
+    dropped = as_stranger("DROP VIEW IF EXISTS lr_v2")
+    survives = _one(conn, "SELECT count(*) FROM pg_class WHERE relname = 'lr_others'")
+    expect.text(f"{named}|{dropped}|{survives}", "42501|ok|1",
+                "a role cannot name another role's table as its rollup's partials (42501), and that table survives its view's drop (#1376)")
+    expect.text(as_stranger("CREATE TABLE lr_notview (bucket timestamptz) USING pgcolumnar",
+                            "CREATE TABLE lr_p4 (bucket timestamptz) USING pgcolumnar", row("lr_notview", "lr_p4")),
+                "42809", "a rollup row whose rollup is not a view is refused (42809, #1376)")
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE lr_p5 (bucket timestamptz) USING pgcolumnar")
+        cur.execute("CREATE VIEW lr_v5 AS SELECT bucket FROM lr_p5")
+        cur.execute("CREATE TABLE lr_p6 (bucket timestamptz) USING pgcolumnar")
+        cur.execute(row("lr_v5", "lr_p5"))
+    expect.text(ddl("UPDATE pgcolumnar.rollup SET partials = 'lr_p6' WHERE rollup = 'lr_v5'::regclass"), "0A000",
+                "a rollup row's view, partials and source cannot be changed once written (0A000, #1376)")

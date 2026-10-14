@@ -4160,6 +4160,36 @@ PgColumnarDeleteOptions(Oid relid)
 }
 
 /*
+ * PgColumnarForgetRollup
+ *		Delete a dropped rollup view's rows from pgcolumnar.rollup and
+ *		pgcolumnar.rollup_group (#1376). Both are keyed by the view's OID in their
+ *		first column. Before this, DROP VIEW left both behind, keyed to a dead OID
+ *		that nothing could reach.
+ */
+void
+PgColumnarForgetRollup(Oid viewOid)
+{
+	static const char *const catalogs[] = {"rollup", "rollup_group"};
+	int			i;
+
+	for (i = 0; i < lengthof(catalogs); i++)
+	{
+		Relation	rel = open_columnar_table(catalogs[i], RowExclusiveLock);
+		ScanKeyData key[1];
+		SysScanDesc scan;
+		HeapTuple	tuple;
+
+		ScanKeyInit(&key[0], 1, BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(viewOid));
+		scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+			CatalogTupleDelete(rel, &tuple->t_self);
+		systable_endscan(scan);
+		table_close(rel, RowExclusiveLock);
+	}
+}
+
+/*
  * PgColumnarIsColumnarRelation
  *		Whether a relation uses the columnar table access method AND has
  *		storage of its own. The access method oid is resolved once and cached.

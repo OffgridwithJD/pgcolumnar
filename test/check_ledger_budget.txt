@@ -2210,4 +2210,20 @@ suites_not_covered 234
 #     never         2099 +  1 - 14 = 2086
 #     dated          644 + 14      = 658
 #     2086 + 658 == 2744
-checks_never_observed_red 2086
+#
+# #1376, a rollup and its source are dropped together (jdatcmd): 2086 -> 2087. rollup
+# gains eight checks from five-major runs (90/90 on each of 15-19). Four are dated by
+# main before the fix, where the view, partials and source had no dependency between
+# them and nothing cleaned the catalog rows: DROP VIEW left the partials and rows,
+# DROP TABLE of the source succeeded, CASCADE then had nothing to drop, and a role
+# could tie a table it cannot read to its own view. Three more are dated by the first
+# version of the trigger (#1406 review): it let a role name another role's table as
+# its partials (and dropped that table with the role's view), a non-view as its
+# rollup, and change a written row. The control that both rollups refreshed arrives
+# never.
+#
+#     ledger rows   2744 + 8 = 2752
+#     never         2086 + 1 = 2087
+#     dated          658 + 7 =  665
+#     2087 + 665 == 2752
+checks_never_observed_red 2087
