@@ -757,6 +757,10 @@ def test_rollup_dump_and_restore(pgc_cluster, tmp_path, expect):
         expect.text(owner(dst_db, "SELECT pgcolumnar.refresh_rollup('rq.tank_30m')")[0], "600",
                     "and then folds exactly the rows appended after the restore")
         expect.text(admin(dst_db, rollup), admin(dst_db, recompute), "and the restored rollup equals a full recompute")
+        # The restore wrote the catalog row back, and with it the view's dependency on
+        # the restored source (#1376).
+        expect.text(f"{owner(dst_db, 'DROP TABLE rq.tank')[1]}|{admin(dst_db, 'SELECT count(*) FROM rq.tank')}",
+                    "2BP01|4600", "after a restore the rollup's source cannot be dropped while the rollup exists (2BP01)")
 
         # Into its own database after DROP EXTENSION: the same cluster and database
         # OID, and the sequence restarted, so again the recorded storage id.

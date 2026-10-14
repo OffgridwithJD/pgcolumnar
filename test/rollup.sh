@@ -503,6 +503,10 @@ check_num "after rebase_rollup a refresh folds nothing" \
 rd_as "$RD2" "INSERT INTO rd.src SELECT '2026-06-01'::timestamptz + g * interval '1 min', g % 3, g FROM generate_series(3001, 3500) g" >/dev/null
 check_num "and then folds exactly the rows appended after the restore" "$(rd_as "$RD2" "SELECT pgcolumnar.refresh_rollup('rd.r')")" "500"
 check "and the restored rollup equals a full recompute" "$(rd_q "$RD2" "$RD_ROLLUP")" "$(rd_q "$RD2" "$RD_RECOMPUTE")"
+# The restore wrote the catalog row back, and with it the view's dependency on the
+# restored source (#1376): the source cannot be dropped from under its rollup.
+check "after a restore the rollup's source cannot be dropped while the rollup exists (2BP01)" \
+	"$(rd_state "$RD2" "DROP TABLE rd.src")|$(rd_q "$RD2" "SELECT count(*) FROM rd.src")" "2BP01|3500"
 
 # Restored into the same database after DROP EXTENSION: same cluster, same database
 # OID, and the sequence restarted, so again the recorded storage id.
