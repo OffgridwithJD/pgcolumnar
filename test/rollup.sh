@@ -381,6 +381,30 @@ check_num "and refreshes it" "$(as_role ru_a "SELECT pgcolumnar.refresh_rollup('
 check "and reads what a recompute gives" \
 	"$(as_role ru_a "SELECT string_agg(bucket || ':' || count || ':' || sum_v, ' ' ORDER BY bucket) FROM own_r")" \
 	"$(q "SELECT string_agg(b || ':' || n || ':' || s, ' ' ORDER BY b) FROM (SELECT date_bin('1 day', ts, '$ORIGIN') b, count(*) n, sum(v)::numeric s FROM own_src GROUP BY 1) x;")"
+# THE WRITE SIDE AND THE DEFINER HELPERS (#1341). The policies have USING only, so
+# they also check an INSERT's new row; and an UPDATE or DELETE with no WHERE reads
+# nothing, so only the policy's USING keeps it off another owner's rows. Asked
+# before the read-side arms below, so a write that got through is what fails.
+_st() { sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p'; }
+_rg_own="$(q "SELECT count(*) FROM pgcolumnar.rollup_group WHERE rollup = 'own_r'::regclass;")"
+check "premise: the owner's rollup has group rows another role could reach" \
+	"$([ "${_rg_own:-0}" -gt 0 ] 2>/dev/null && echo some || echo "none ($_rg_own)")" "some"
+check "another role cannot add a group row to the owner's rollup (42501)" \
+	"$(as_role ru_b "INSERT INTO pgcolumnar.rollup_group VALUES ('public.own_r'::regclass, 999999, 1, 0, NULL, NULL, false)" | _st)" "42501"
+as_role ru_b "UPDATE pgcolumnar.rollup SET history_has_null = true" >/dev/null
+as_role ru_b "DELETE FROM pgcolumnar.rollup_group" >/dev/null
+check "and its unqualified UPDATE and DELETE reach none of the owner's catalog rows" \
+	"$(q "SELECT history_has_null FROM pgcolumnar.rollup WHERE rollup = 'own_r'::regclass;")|$(q "SELECT count(*) FROM pgcolumnar.rollup_group WHERE rollup = 'own_r'::regclass;")" \
+	"f|$_rg_own"
+# rollup_source_groups and rollup_source_retired run as their definer, so the
+# catalogs they read refuse no one; the caller's SELECT on the source is checked
+# by require_caller_select against the OUTER user.
+check "the owner reads its source's groups through the definer helpers" \
+	"$(as_role ru_a "SELECT (count(*) > 0)::text FROM pgcolumnar.rollup_source_groups('own_src')")|$(as_role ru_a "SELECT count(*) >= 0 FROM pgcolumnar.rollup_source_retired('own_src')")" "true|t"
+check "another role cannot read the source's groups through rollup_source_groups (42501)" \
+	"$(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup_source_groups('public.own_src')" | _st)" "42501"
+check "nor its retired groups through rollup_source_retired (42501)" \
+	"$(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup_source_retired('public.own_src')" | _st)" "42501"
 check "another role sees none of its rollup catalog rows" \
 	"$(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup") $(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup_group")" "0 0"
 # Row-level security hides the catalog row, so to that role it is no rollup at
