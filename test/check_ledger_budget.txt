@@ -1928,4 +1928,18 @@ suites_not_covered 244
 #     never         1893 + 2 = 1895
 #     dated          567 + 2 =  569
 #     1895 + 569 == 2464
+#
+# #1341, import_arrow's two unsupported shapes (OffgridwithJD): 1895 -> 1895. arrow_import
+# was seeded by #1363, so this adds rows to a covered suite and moves no ceiling. Two
+# new checks: "reject a compressed record-batch body", dated by the compressed-body
+# refusal removed (the file then fails as malformed, XX001, not 0A000), and its
+# pyarrow premise, never. "reject dictionary-encoded file" now asserts SQLSTATE and
+# message, and is dated for the first time by the dictionary-batch refusal removed;
+# main's suite survives both mutations. Five-major runs on the merged suite: 77/77 on
+# 15-19.
+#
+#     ledger rows   2464 + 2     = 2466
+#     never         1895 + 1 - 1 = 1895
+#     dated          569 + 2     =  571
+#     1895 + 571 == 2466
 checks_never_observed_red 1895
