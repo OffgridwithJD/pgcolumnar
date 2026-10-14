@@ -461,4 +461,76 @@ check "rebase_rollup of a table that is not a rollup is refused (42704)" \
 check_num "and no refused rollup left a table behind" \
 	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('r_m', 'r_p', 'r_l', 'r_c', 'r_s', 'r_t', 'r_g', 'r_f');")" "0"
 
+# ---- a rollup and its source are dropped together (#1376) ----------------------
+#
+# The catalog held the source and the view as bare OIDs. DROP TABLE of the source
+# succeeded and left the rollup unrefreshable for good (42P01 on the dead OID, or a
+# reused OID folded silently); DROP VIEW left the partials table and the catalog rows
+# behind. Now the view depends on the source as a view over it would, so the drop is
+# refused and CASCADE takes the rollup; and dropping the view takes the rest of it.
+q "CREATE TABLE lsrc (ts timestamptz, v int) USING pgcolumnar;
+   INSERT INTO lsrc SELECT '$ORIGIN'::timestamptz + g * interval '7 minutes', g FROM generate_series(1, 500) g;" >/dev/null
+for lr in lr_a lr_b; do
+	psql_run "SELECT pgcolumnar.create_rollup('$lr', 'lsrc', 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');" >/dev/null
+	psql_run "SELECT pgcolumnar.refresh_rollup('$lr');" >/dev/null
+done
+lr_a_oid="$(q "SELECT 'lr_a'::regclass::oid")"
+lr_b_oid="$(q "SELECT 'lr_b'::regclass::oid")"
+lr_left() {	# lr_left OID NAME -> "<view and partials left>|<rollup rows>|<rollup_group rows>"
+	q "SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('$2', '$2__partials')) || '|' ||
+	          (SELECT count(*) FROM pgcolumnar.rollup WHERE rollup::oid = $1) || '|' ||
+	          (SELECT count(*) FROM pgcolumnar.rollup_group WHERE rollup::oid = $1)"
+}
+check "both rollups over the source refreshed, so each has a view, partials and catalog rows" \
+	"$(q "SELECT (SELECT sum(count) FROM lr_a) || '|' || (SELECT sum(count) FROM lr_b)")|$(lr_left "$lr_a_oid" lr_a | cut -d'|' -f1,2)" "500|500|2|1"
+check "DROP VIEW of a rollup takes its partials and its catalog rows with it (#1376)" \
+	"$(sqlstate "DROP VIEW lr_b")|$(lr_left "$lr_b_oid" lr_b)" "ok|0|0|0"
+check "DROP TABLE of a rollup's source is refused while the rollup exists (2BP01, #1376)" \
+	"$(sqlstate "DROP TABLE lsrc")|$(q "SELECT count(*) FROM pg_class WHERE relname = 'lsrc'")" "2BP01|1"
+check "and DROP TABLE ... CASCADE takes the rollup's view, partials and catalog rows with it (#1376)" \
+	"$(sqlstate "SET client_min_messages = warning; DROP TABLE lsrc CASCADE")|$(lr_left "$lr_a_oid" lr_a)" "ok|0|0|0"
+# The trigger that records those dependencies writes to pg_depend for whoever writes
+# a rollup row, and the row-level security on the catalog only asks that they own
+# the view. So it asks what a view over the source would: SELECT on the source.
+# Without that, a role could tie a table it cannot read to a view of its own and
+# block the table owner's DROP TABLE.
+psql_run "DROP ROLE IF EXISTS lr_stranger; CREATE ROLE lr_stranger LOGIN;
+          GRANT USAGE, CREATE ON SCHEMA public TO lr_stranger; GRANT USAGE ON SCHEMA pgcolumnar TO lr_stranger;
+          CREATE TABLE lr_victim (ts timestamptz, v int) USING pgcolumnar; REVOKE ALL ON lr_victim FROM PUBLIC;"
+lr_tie="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U lr_stranger -d "$PGC_DB" \
+	-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "CREATE TABLE lr_mine (bucket timestamptz) USING pgcolumnar;
+	CREATE VIEW lr_my_view AS SELECT bucket FROM lr_mine;
+	INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width, origin,
+	  group_by, agg_functions, agg_columns)
+	VALUES ('lr_my_view', 'lr_mine', 'lr_victim', 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');" 2>&1 >/dev/null)"
+check "a role cannot tie a rollup row to a table it cannot read (42501, #1376)" \
+	"$(st="$(sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$lr_tie" | head -1)"; echo "${st:-${lr_tie:+other}}")|$(sqlstate "DROP TABLE lr_victim")" "42501|ok"
+# The partials table goes with the view by an AUTO dependency, and a drop deletes AUTO
+# dependents with no ownership check. So the trigger requires the writer to own the
+# partials too, and the rollup to be a view and the partials a table (#1406 review):
+# otherwise a role names another role's table as its partials and drops its own view.
+as_stranger() {	# as_stranger SQL -> ok, the SQLSTATE it fails with, or other
+	local out st
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U lr_stranger -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "$1" 2>&1 >/dev/null)"
+	[ -z "$out" ] && { echo ok; return; }
+	st="$(sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1)"
+	echo "${st:-other}"
+}
+psql_run "CREATE TABLE lr_others (bucket timestamptz) USING pgcolumnar; GRANT SELECT ON lr_others TO lr_stranger;
+          CREATE TABLE lr_src2 (ts timestamptz, v int) USING pgcolumnar; GRANT SELECT ON lr_src2 TO lr_stranger;"
+lr_row() {	# lr_row VIEW PARTIALS -> a rollup row over lr_src2
+	echo "INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width, origin,
+	  group_by, agg_functions, agg_columns) VALUES ('$1', '$2', 'lr_src2', 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');"
+}
+check "a role cannot name another role's table as its rollup's partials (42501), and that table survives its view's drop (#1376)" \
+	"$(as_stranger "CREATE TABLE lr_p2 (bucket timestamptz) USING pgcolumnar; CREATE VIEW lr_v2 AS SELECT bucket FROM lr_p2; $(lr_row lr_v2 lr_others)")|$(as_stranger "SET client_min_messages = warning; DROP VIEW IF EXISTS lr_v2")|$(q "SELECT count(*) FROM pg_class WHERE relname = 'lr_others'")" \
+	"42501|ok|1"
+check "a rollup row whose rollup is not a view is refused (42809, #1376)" \
+	"$(as_stranger "CREATE TABLE lr_notview (bucket timestamptz) USING pgcolumnar; CREATE TABLE lr_p4 (bucket timestamptz) USING pgcolumnar; $(lr_row lr_notview lr_p4)")" "42809"
+psql_run "CREATE TABLE lr_p5 (bucket timestamptz) USING pgcolumnar; CREATE VIEW lr_v5 AS SELECT bucket FROM lr_p5;
+          CREATE TABLE lr_p6 (bucket timestamptz) USING pgcolumnar; $(lr_row lr_v5 lr_p5)"
+check "a rollup row's view, partials and source cannot be changed once written (0A000, #1376)" \
+	"$(sqlstate "UPDATE pgcolumnar.rollup SET partials = 'lr_p6' WHERE rollup = 'lr_v5'::regclass")" "0A000"
+
 pgc_summary

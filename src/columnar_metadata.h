@@ -83,6 +83,7 @@ extern NativeBloomMetadata *PgColumnarReadBloomForColumn(uint64 storageId,
 													   Snapshot snapshot);
 
 extern void PgColumnarDeleteOptions(Oid relid);
+extern void PgColumnarForgetRollup(Oid viewOid);
 
 extern List *PgColumnarReadSortBy(Oid relid);
 

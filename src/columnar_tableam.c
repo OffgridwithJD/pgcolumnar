@@ -32,6 +32,10 @@
 #include "catalog/storage.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "commands/trigger.h"
+#include "catalog/dependency.h"
+#include "access/htup_details.h"
+#include "utils/acl.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "executor/tuptable.h"
@@ -3715,6 +3719,134 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 	}
 }
 
+/*
+ * pgcolumnar_forget_dropped_rollup
+ *		Delete the catalog rows of a dropped view if it was a rollup (#1376). Gated
+ *		as the options cleanup below is: the hook fires in every database, including
+ *		one without the extension, and DROP EXTENSION drops the extension's own views
+ *		while the catalogs themselves are going.
+ */
+static void
+pgcolumnar_forget_dropped_rollup(Oid viewOid)
+{
+	Oid			columnarNsp = get_namespace_oid(COLUMNAR_SCHEMA_NAME, true);
+	Oid			rollupOid = OidIsValid(columnarNsp) ?
+		get_relname_relid("rollup", columnarNsp) : InvalidOid;
+	Oid			extOid = get_extension_oid("pgcolumnar", true);
+
+	if (!OidIsValid(rollupOid))
+		return;
+	if (OidIsValid(extOid) &&
+		getExtensionOfObject(RelationRelationId, viewOid) == extOid)
+		return;
+	PgColumnarForgetRollup(viewOid);
+}
+
+/*
+ * pgcolumnar_rollup_record_dependencies
+ *		AFTER INSERT OR UPDATE trigger on pgcolumnar.rollup (#1376). The catalog
+ *		holds the view, its partials table and the source as bare OIDs, so nothing
+ *		stopped DROP TABLE of the source, after which the rollup could never be
+ *		refreshed again (or, with the OID reused, folded another table's rows), and
+ *		DROP VIEW left the partials and the catalog rows behind. It records:
+ *		  - the view on the source, NORMAL, as a view over the source would have:
+ *		    DROP TABLE of the source is refused, and CASCADE takes the rollup;
+ *		  - the partials on the view, AUTO: dropping the view takes its partials.
+ *		The view's own rule already depends on the partials, which is why this is
+ *		not an INTERNAL dependency: that would make DROP TABLE of the partials
+ *		redirect to the view instead of refusing.
+ *
+ *		A trigger rather than a call in create_rollup, so a restore that writes the
+ *		catalog rows back records the dependencies again (#1377). The caller must
+ *		hold SELECT on the source, as creating a view over it would require.
+ */
+PG_FUNCTION_INFO_V1(pgcolumnar_rollup_record_dependencies);
+
+Datum
+pgcolumnar_rollup_record_dependencies(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	HeapTuple	tuple;
+	TupleDesc	desc;
+	bool		isnull;
+	Oid			view;
+	Oid			partials;
+	Oid			source;
+	ObjectAddress viewAddr;
+	ObjectAddress partialsAddr;
+	ObjectAddress sourceAddr;
+
+	if (!CALLED_AS_TRIGGER(fcinfo) ||
+		!TRIGGER_FIRED_AFTER(trigdata->tg_event) ||
+		!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+		elog(ERROR, "pgcolumnar_rollup_record_dependencies: not called as an AFTER ROW trigger");
+
+	desc = RelationGetDescr(trigdata->tg_relation);
+
+	/*
+	 * NOTHING CHANGES WHAT A ROW NAMES ONCE IT IS WRITTEN (#1406 review). No
+	 * function issues such an UPDATE, and re-recording would have to remove the
+	 * old row's dependencies too; a no-op SET of the same values is let through.
+	 */
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	{
+		int			att;
+
+		for (att = 1; att <= 3; att++)
+		{
+			bool		oldnull;
+			bool		newnull;
+			Oid			before = DatumGetObjectId(heap_getattr(trigdata->tg_trigtuple, att,
+															   desc, &oldnull));
+			Oid			after = DatumGetObjectId(heap_getattr(trigdata->tg_newtuple, att,
+															  desc, &newnull));
+
+			if (before != after)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("a rollup's view, partials and source cannot be changed")));
+		}
+		return PointerGetDatum(NULL);
+	}
+
+	tuple = trigdata->tg_trigtuple;
+	view = DatumGetObjectId(heap_getattr(tuple, 1, desc, &isnull));
+	partials = DatumGetObjectId(heap_getattr(tuple, 2, desc, &isnull));
+	source = DatumGetObjectId(heap_getattr(tuple, 3, desc, &isnull));
+
+	/*
+	 * THE WRITER MUST OWN WHAT IT TIES TOGETHER (#1406 review). A drop deletes
+	 * AUTO dependents with no ownership check, so a row naming another role's
+	 * table as its partials would hand that table to the writer's DROP VIEW. The
+	 * catalog's row-level security asks only that the writer own the view.
+	 */
+	if (get_rel_relkind(view) != RELKIND_VIEW)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("a rollup must be a view")));
+	if (get_rel_relkind(partials) != RELKIND_RELATION)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("a rollup's partials must be a table")));
+	if (!COLUMNAR_TABLE_OWNERCHECK(view))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_VIEW, get_rel_name(view));
+	if (!COLUMNAR_TABLE_OWNERCHECK(partials))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(partials));
+	if (pg_class_aclcheck(source, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied for table %s", get_rel_name(source))));
+
+	ObjectAddressSet(viewAddr, RelationRelationId, view);
+	ObjectAddressSet(partialsAddr, RelationRelationId, partials);
+	ObjectAddressSet(sourceAddr, RelationRelationId, source);
+
+	recordDependencyOn(&viewAddr, &sourceAddr, DEPENDENCY_NORMAL);
+	recordDependencyOn(&partialsAddr, &viewAddr, DEPENDENCY_AUTO);
+
+	return PointerGetDatum(NULL);
+}
+
 static void
 pgcolumnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 					   int subId, void *arg)
@@ -3728,6 +3860,17 @@ pgcolumnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 	if (access == OAT_DROP && classId == RelationRelationId && subId == 0)
 	{
 		Relation	rel;
+
+		/*
+		 * A dropped rollup view takes its catalog rows with it (#1376). Its
+		 * partials table goes by the auto dependency the rollup catalog's trigger
+		 * records; these rows have no dependency of their own to go by.
+		 */
+		if (get_rel_relkind(objectId) == RELKIND_VIEW)
+		{
+			pgcolumnar_forget_dropped_rollup(objectId);
+			return;
+		}
 
 		/*
 		 * Ordinary tables AND materialized views. A columnar matview has

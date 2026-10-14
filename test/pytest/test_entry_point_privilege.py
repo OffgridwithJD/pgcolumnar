@@ -31,7 +31,10 @@ EXEMPT = {"columnar_handler", "parquet_fdw_handler", "parquet_fdw_validator", "i
           "iceberg_fdw_validator", "iceberg_catalog_fdw_validator", "parquet_schema", "read_parquet",
           "file_split_offsets", "iceberg_current_snapshot", "iceberg_data_files", "iceberg_scan",
           "iceberg_rest_table_location", "iceberg_rest_scan", "iceberg_rest_namespaces",
-          "iceberg_rest_tables", "read_avro_manifest", "read_manifest_list", "row_tid"}
+          "iceberg_rest_tables", "read_avro_manifest", "read_manifest_list", "row_tid",
+          # A trigger function (#1376): never called directly, it runs on writes to
+          # pgcolumnar.rollup and checks SELECT on the source itself (test_rollup.py).
+          "rollup_record_dependencies"}
 # Relation-taking entry points with no privilege check of any kind: none, and a
 # name added here is a claim that something is ungated.
 KNOWN_UNGUARDED: set = set()

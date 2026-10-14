@@ -663,6 +663,11 @@ If the source is rewritten, for example by `pgcolumnar.vacuum`, `refresh_rollup`
 refuses with `55000`. If the rollup was current before the rewrite, run
 `pgcolumnar.rebase_rollup` to record the rewritten table and continue.
 
+**A rollup depends on its source.** `DROP TABLE` of the source is refused while
+a rollup reads from it, as it is for a view. `DROP TABLE ... CASCADE` drops the
+rollup too. To remove only the rollup, run `DROP VIEW` on it, which also drops
+its partials table and its catalog rows.
+
 Run `refresh_rollup` at READ COMMITTED. A role that is not a superuser needs
 `USAGE` on schema `pgcolumnar`, which a superuser grants. Each role then sees
 and refreshes only the rollups that it owns.

@@ -2412,6 +2412,14 @@ CREATE POLICY rollup_group_owner ON pgcolumnar.rollup_group
 					   (SELECT c.relowner FROM pg_class c WHERE c.oid = rollup), 'USAGE'));
 GRANT SELECT, INSERT, UPDATE, DELETE ON pgcolumnar.rollup, pgcolumnar.rollup_group TO PUBLIC;
 
+-- The view depends on its source, and the partials on the view, recorded by this
+-- trigger whenever a rollup row is written, a restore included (#1376, #1377).
+CREATE FUNCTION pgcolumnar.rollup_record_dependencies() RETURNS trigger
+	LANGUAGE C AS 'MODULE_PATHNAME', 'pgcolumnar_rollup_record_dependencies';
+CREATE TRIGGER rollup_dependencies
+	AFTER INSERT OR UPDATE OF rollup, partials, source ON pgcolumnar.rollup
+	FOR EACH ROW EXECUTE FUNCTION pgcolumnar.rollup_record_dependencies();
+
 /*
  * The source's row groups, with each one's deleted count. SECURITY DEFINER
  * because row_group and delete_vector carry no GRANT; the caller must be able to
