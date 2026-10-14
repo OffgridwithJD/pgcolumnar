@@ -807,7 +807,7 @@ def test_min_and_max_keep_each_columns_collation(pgc_own_db, expect):
                     " FROM generate_series(1, 2000) g")
     folded = _one(conn, "SELECT pgcolumnar.refresh_rollup('r_ct')")
     expect.text(f"{folded}|{_one(conn, 'SELECT count(*) FROM r_ct')}", "2000|1",
-                "premise: the second refresh folds new rows into the existing bucket")
+                "the second refresh folds new rows into the existing bucket")
     expect.text(_one(conn, "SELECT min_sc || '|' || max_sc || '|' || min_su || '|' || max_su FROM r_ct"),
                 _one(conn, "SELECT min(sc) || '|' || max(sc) || '|' || min(su) || '|' || max(su) FROM ct"),
                 "min and max over a C column and an en_US column keep each column's own order across a refresh")

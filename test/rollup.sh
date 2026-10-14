@@ -639,7 +639,9 @@ if [ -n "$CT_COLL" ]; then
 	q "SELECT pgcolumnar.create_rollup('r_ct', 'ct', 'ts', '1 day', '$ORIGIN', '{}', '{min,max,min,max}', '{sc,sc,su,su}');" >/dev/null
 	q "SELECT pgcolumnar.refresh_rollup('r_ct');" >/dev/null
 	q "INSERT INTO ct SELECT '$ORIGIN'::timestamptz + (g % 24) * interval '1 hour', 'B'||g, 'B'||g FROM generate_series(1, 2000) g;" >/dev/null
-	check "premise: the second refresh folds new rows into the existing bucket" \
+	# A check, not a premise (#1236; #1372 review): refresh_rollup's return value and
+	# the bucket count are both product output.
+	check "the second refresh folds new rows into the existing bucket" \
 		"$(q "SELECT pgcolumnar.refresh_rollup('r_ct');")|$(q "SELECT count(*) FROM r_ct;")" "2000|1"
 	check "min and max over a C column and an en_US column keep each column's own order across a refresh" \
 		"$(q "SELECT min_sc || '|' || max_sc || '|' || min_su || '|' || max_su FROM r_ct;")" \
@@ -647,7 +649,7 @@ if [ -n "$CT_COLL" ]; then
 	check "premise: the two collations disagree on these rows, so the arm can tell them apart" \
 		"$(q "SELECT (min(sc) COLLATE \"C\" <> min(su) COLLATE \"C\")::text FROM ct;")" "true"
 else
-	for _n in "premise: the second refresh folds new rows into the existing bucket" \
+	for _n in "the second refresh folds new rows into the existing bucket" \
 			"min and max over a C column and an en_US column keep each column's own order across a refresh" \
 			"premise: the two collations disagree on these rows, so the arm can tell them apart"; do
 		check_skip "$_n" "SKIP  $_n (no en_US collation)" "the server has no en_US collation"
