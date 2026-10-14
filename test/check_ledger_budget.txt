@@ -2162,4 +2162,15 @@ suites_not_covered 237
 #     never         2050 - 2 = 2048
 #     dated          633 + 2 = 635
 #     2048 + 635 == 2683
+#
+# #1341, a PUBLIC user mapping (OffgridwithJD): 2048 -> 2048. Two new objstore_credentials
+# arms, each dated: the lookup without its PUBLIC fallback (a role with no mapping of
+# its own then read nothing), and the lookup trying PUBLIC first (bob's own wrong
+# secret was then bypassed by the PUBLIC mapping's good one). Five-major runs: 27/27
+# on 15-19, the twin passing with pyarrow required.
+#
+#     ledger rows   2683 + 2 = 2685
+#     never         2048     = 2048
+#     dated          635 + 2 = 637
+#     2048 + 637 == 2685
 checks_never_observed_red 2048
