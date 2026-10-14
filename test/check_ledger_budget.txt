@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 237
+suites_not_covered 234
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2173,4 +2173,41 @@ suites_not_covered 237
 #     never         2048     = 2048
 #     dated          635 + 2 = 637
 #     2048 + 637 == 2685
-checks_never_observed_red 2048
+#
+# #1341, three privilege suites seeded with their pytest twins (OffgridwithJD): 2048 ->
+# 2099, and suites_not_covered 237 -> 234. None had rows. debug_hook_privilege (10),
+# vacuum_lock_privilege (18) and vm_privilege (30) enter with every check from
+# five-major runs, all green on each of 15-19. Seven are dated: the debug advance hook
+# without its owner check (two), compact checking ownership after its lock (one), and
+# vm_selftest without its owner check (four). vm_privilege's owner controls now run
+# on a table of their own, so that mutation's attack no longer reddens them. The
+# other 51 arrive never.
+#
+#     ledger rows   2685 + 58 = 2743
+#     never         2048 + 51 = 2099
+#     dated          637 +  7 = 644
+#     2099 + 644 == 2743
+#
+# #1341, the #1381 review of those three (OffgridwithJD): 2099 -> 2086. One new check,
+# "premise: the lock is still held after the last probe", arrives never. Fourteen rows
+# are dated for the first time, by four mutations:
+#   - vacuum checking ownership after its lock: the queued-lock arm, now watched while
+#     a refused probe runs (asked after every probe had exited it could not fail, and
+#     main's suite survives this mutation on it), and vacuum's own arm;
+#   - every maintenance entry point checking ownership after its lock: the eight
+#     contention arms and drop_projection's type disclosure. Main's 30 s holder had
+#     expired by the eighth probe, so compact's arm stayed green there; the holder now
+#     holds until it is released;
+#   - the advance hook refusing everyone: the owner's call (renamed from a premise)
+#     and the peon's own-table mirror;
+#   - set_metapage_version without its owner check: its 42501 arm, its owner-gate
+#     message arm and the gated table's read.
+# Five rows are renamed, keeping their history: the queued-lock arm, and four product
+# checks that carried the premise prefix (the advance-hook owner call, and vm's live
+# row count, empty visibility map and block count).
+#
+#     ledger rows   2743 + 1 = 2744
+#     never         2099 +  1 - 14 = 2086
+#     dated          644 + 14      = 658
+#     2086 + 658 == 2744
+checks_never_observed_red 2086
