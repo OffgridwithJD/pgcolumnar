@@ -664,3 +664,114 @@ def test_a_rollup_and_its_source_are_dropped_together(pgc_conn, pgc_cluster, exp
         cur.execute(row("lr_v5", "lr_p5"))
     expect.text(ddl("UPDATE pgcolumnar.rollup SET partials = 'lr_p6' WHERE rollup = 'lr_v5'::regclass"), "0A000",
                 "a rollup row's view, partials and source cannot be changed once written (0A000, #1376)")
+
+
+def test_rollup_dump_and_restore(pgc_cluster, tmp_path, expect):
+    """A DUMP AND RESTORE (#1377). The definition is dumped, so the rollup exists
+    after a restore; the row groups it folded are not, as they name storage a restore
+    replaces. Neither the database OID nor the storage id tells a restored source from
+    the recorded one: storageid_seq restarts with the extension, so the first columnar
+    table of a new database gets the same storage id, and a refresh would fold every
+    restored row into the restored partials a second time. The OID does: the dump
+    writes the source as a name and its recorded OID as a number.
+
+    Its own databases and role. The partials are heap and the source is its database's
+    only columnar table, so the restored source gets the recorded storage id: the case
+    a storage id alone does not catch."""
+    import subprocess
+
+    src_db, dst_db = "pgc_rq_src", "pgc_rq_dst"
+    dump = tmp_path / "rollup-1377.sql"
+    bindir = pgc_cluster.bindir
+    conn_args = ["-h", "127.0.0.1", "-p", str(pgc_cluster.port), "-U", "postgres"]
+
+    def admin(db, sql):
+        with psycopg.connect(pgc_cluster.dsn(dbname=db), autocommit=True) as c:
+            row = c.execute(sql).fetchone() if sql.lstrip().upper().startswith("SELECT") else c.execute(sql)
+            return str(row[0]) if isinstance(row, tuple) else None
+
+    def owner(db, sql):
+        """(value, sqlstate, hint) of SQL run as the rollup's owner, not a superuser."""
+        with psycopg.connect(pgc_cluster.dsn(dbname=db), autocommit=True) as c:
+            c.execute("SET ROLE rq_owner")
+            try:
+                row = c.execute(sql).fetchone()
+                return (str(row[0]) if row else "", "ok", None)
+            except psycopg.Error as e:
+                return (None, e.sqlstate or "?", e.diag.message_hint)
+
+    def restore(db):
+        p = subprocess.run([f"{bindir}/psql", *conn_args, "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1",
+                            "-f", str(dump)], capture_output=True, text=True)
+        return "0" if p.returncode == 0 else \
+            f"{p.returncode} " + next((l for l in p.stderr.splitlines() if "ERROR" in l), p.stderr[:200])
+
+    recompute = ("SELECT count(*) || '|' || md5(string_agg(b || ':' || n || ':' || m, ' ' ORDER BY b)) FROM"
+                 " (SELECT date_bin('30 minutes', at, '2026-01-01') b, count(*) n, max(level) m"
+                 " FROM rq.tank GROUP BY 1) x")
+    rollup = ("SELECT count(*) || '|' || md5(string_agg(bucket || ':' || count || ':' || max_level, ' '"
+              " ORDER BY bucket)) FROM rq.tank_30m")
+
+    admin("postgres", "DO $$ BEGIN CREATE ROLE rq_owner; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    for db in (src_db, dst_db):
+        admin("postgres", f"DROP DATABASE IF EXISTS {db}")
+    try:
+        admin("postgres", f"CREATE DATABASE {src_db}")
+        admin(src_db, "CREATE EXTENSION pgcolumnar")
+        admin(src_db, "GRANT USAGE ON SCHEMA pgcolumnar TO rq_owner")
+        admin(src_db, "CREATE SCHEMA rq AUTHORIZATION rq_owner")
+        owner(src_db, "CREATE TABLE rq.tank (at timestamptz, level int) USING pgcolumnar")
+        owner(src_db, "INSERT INTO rq.tank SELECT '2026-07-01'::timestamptz + g * interval '50 s', (g * 7) % 1000"
+                      " FROM generate_series(1, 4000) g")
+        owner(src_db, "SELECT pgcolumnar.create_rollup('tank_30m', 'rq.tank', 'at', '30 minutes', '2026-01-01',"
+                      " '{}', '{count,max}', '{*,level}', 'heap')")
+        expect.text(owner(src_db, "SELECT pgcolumnar.refresh_rollup('rq.tank_30m')")[0], "4000",
+                    "the rollup to be dumped folds its source")
+        sid = admin(src_db, "SELECT pgcolumnar.get_storage_id('rq.tank')")
+        p = subprocess.run([f"{bindir}/pg_dump", *conn_args, "-d", src_db, "-f", str(dump)],
+                           capture_output=True, text=True)
+        expect.text(str(p.returncode), "0", "the database holding a rollup dumps")
+
+        # Into another database.
+        admin("postgres", f"CREATE DATABASE {dst_db}")
+        expect.text(restore(dst_db), "0", "the dump restores into another database")
+        expect.text(admin(dst_db, "SELECT count(*) || '|' || pgcolumnar.get_storage_id('rq.tank') FROM rq.tank"),
+                    f"4000|{sid}", "the restored source holds the dumped rows under the storage id recorded for the old one")
+        expect.text(admin(dst_db, "SELECT coalesce((SELECT source::text || ' ' || ts_column || ' ' || width || ' '"
+                                  " || agg_functions::text || ' ' || agg_columns::text FROM pgcolumnar.rollup"
+                                  " WHERE rollup = 'rq.tank_30m'::regclass), 'none')"),
+                    "rq.tank at 00:30:00 {count,max} {*,level}", "a restore keeps the rollup's definition")
+        before = admin(dst_db, rollup)
+        expect.text(before, admin(dst_db, recompute),
+                    "the restored rollup reads as a recompute of the restored source")
+        _, st, hint = owner(dst_db, "SELECT pgcolumnar.refresh_rollup('rq.tank_30m')")
+        expect.text(f"{st}|{admin(dst_db, rollup)}", f"55000|{before}",
+                    "after a restore into another database its owner's refresh is refused (55000), the rollup untouched")
+        expect.text("rebase_rollup" if hint and "rebase_rollup" in hint else f"hint: {hint}", "rebase_rollup",
+                    "and the refusal names rebase_rollup")
+        owner(dst_db, "SELECT pgcolumnar.rebase_rollup('rq.tank_30m')")
+        expect.text(owner(dst_db, "SELECT pgcolumnar.refresh_rollup('rq.tank_30m')")[0], "0",
+                    "after rebase_rollup a refresh folds nothing")
+        owner(dst_db, "INSERT INTO rq.tank SELECT '2026-07-01'::timestamptz + g * interval '50 s', (g * 7) % 1000"
+                      " FROM generate_series(4001, 4600) g")
+        expect.text(owner(dst_db, "SELECT pgcolumnar.refresh_rollup('rq.tank_30m')")[0], "600",
+                    "and then folds exactly the rows appended after the restore")
+        expect.text(admin(dst_db, rollup), admin(dst_db, recompute), "and the restored rollup equals a full recompute")
+
+        # Into its own database after DROP EXTENSION: the same cluster and database
+        # OID, and the sequence restarted, so again the recorded storage id.
+        admin(src_db, "DROP EXTENSION pgcolumnar CASCADE")
+        # The schema is no member of the extension, so it outlives it; the dump creates it.
+        admin(src_db, "DROP SCHEMA pgcolumnar CASCADE")
+        admin(src_db, "DROP SCHEMA rq CASCADE")
+        expect.text(f"{restore(src_db)}|"
+                    + str(admin(src_db, "SELECT count(*) || '|' || pgcolumnar.get_storage_id('rq.tank') FROM rq.tank")),
+                    f"0|4000|{sid}",
+                    "the dump restores into its own database after DROP EXTENSION, again under the recorded storage id")
+        before = admin(src_db, rollup)
+        _, st, _ = owner(src_db, "SELECT pgcolumnar.refresh_rollup('rq.tank_30m')")
+        expect.text(f"{st}|{admin(src_db, rollup)}", f"55000|{before}",
+                    "after a restore into the same database its refresh is refused (55000), the rollup untouched")
+    finally:
+        for db in (src_db, dst_db):
+            admin("postgres", f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
