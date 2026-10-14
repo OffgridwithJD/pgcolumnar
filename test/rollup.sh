@@ -622,4 +622,11 @@ psql_run "CREATE TABLE lr_p5 (bucket timestamptz) USING pgcolumnar; CREATE VIEW 
 check "a rollup row's view, partials and source cannot be changed once written (0A000, #1376)" \
 	"$(sqlstate "UPDATE pgcolumnar.rollup SET partials = 'lr_p6' WHERE rollup = 'lr_v5'::regclass")" "0A000"
 
+# Row numbers start at 1 (#1341). LAST IN THE SUITE ON PURPOSE: without the floor,
+# row_tid(0) crashed the backend (measured on PG17), and a crash mid-suite takes the
+# checks after it down with it, premises included.
+check "row_tid refuses a row number below 1 (22003), and row 1 is accepted" \
+	"$(sqlstate "SELECT pgcolumnar.row_tid(0)")|$(sqlstate "SELECT pgcolumnar.row_tid(-1)")|$(sqlstate "SELECT pgcolumnar.row_tid(1)")" \
+	"22003|22003|ok"
+
 pgc_summary
