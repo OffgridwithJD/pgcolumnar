@@ -212,4 +212,30 @@ check "maintenance_due ACCEPTS the boundary thresholds 1.0, 1.0" \
 check "maintenance_due ACCEPTS its own defaults" \
 	"$(sqlstate "SELECT * FROM pgcolumnar.maintenance_due('nd')")" "OK"
 
+# ---- max_groups caps one call, and the call returns what it rewrote (#1341) ---
+#
+# docs/sql-reference.md: "max_groups caps how many groups a single call rewrites;
+# 0 means no cap. Returns the number of groups rewritten." Ten row groups, each
+# half deleted, so all ten qualify at 0.1. A capped call must stop at three and
+# say three, and an uncapped one then finds the seven it left. The live rows are
+# the same throughout, so the rewrites dropped only dead rows.
+psql_run "DROP TABLE IF EXISTS ncap;
+	  CREATE TABLE ncap (id int, v text) USING pgcolumnar;
+	  SELECT pgcolumnar.set_options('ncap', stripe_row_limit => 1000);
+	  INSERT INTO ncap SELECT g, 'v'||g FROM generate_series(1, 10000) g;
+	  DELETE FROM ncap WHERE id % 2 = 0;"
+# A check, not a premise (#1236; #1374 review): ten groups only if stripe_row_limit
+# is honoured. And per group, as the name says: each holds 500 live rows and 500
+# deleted, read from row_group and delete_vector, not only the table's total.
+check "ten row groups, every one half deleted" \
+	"$(q "SELECT count(*) || '|' || count(*) FILTER (WHERE g.row_count - coalesce(d.deleted_count, 0) = 500
+	                                         AND coalesce(d.deleted_count, 0) = 500)
+	   FROM pgcolumnar.row_group g LEFT JOIN pgcolumnar.delete_vector d
+	     ON d.storage_id = g.storage_id AND d.group_number = g.group_number
+	  WHERE g.storage_id = pgcolumnar.get_storage_id('ncap');")|$(q "SELECT count(*) FROM ncap;")" "10|10|5000"
+check "compact_rewrite with max_groups 3 rewrites three, then an uncapped call the other seven" \
+	"$(q "SELECT pgcolumnar.compact_rewrite('ncap', 0.1, 3);")|$(q "SELECT pgcolumnar.compact_rewrite('ncap', 0.1, 0);")|$(q "SELECT pgcolumnar.compact_rewrite('ncap', 0.1, 0);")" "3|7|0"
+check "and every live row is still there, once" \
+	"$(q "SELECT count(*) || '|' || count(DISTINCT id) || '|' || sum(id) FROM ncap;")" "5000|5000|25000000"
+
 pgc_summary
