@@ -432,6 +432,95 @@ check "a refresh at REPEATABLE READ is refused" \
 	   -c "SELECT pgcolumnar.refresh_rollup('r_utc')" -c "ROLLBACK" 2>&1 |
 	   sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1)" "25000"
 
+# A DUMP AND RESTORE (#1377). The definition is dumped, so the rollup still exists
+# after a restore; its folded row groups are not, because they name storage that
+# a restore replaces. Neither database OID nor storage id tells a restored source
+# from the one recorded: storageid_seq restarts with the extension, so the first
+# columnar table of a new database gets the same storage id, and refresh would fold
+# every restored row into the restored partials a second time. The source's OID does
+# tell them apart: the dump writes the regclass as a name and the recorded oid as a
+# number, so after a restore they disagree, and refresh refuses, naming rebase_rollup.
+# Its own databases, so nothing above is touched. The partials are heap and the
+# source is its database's only columnar table, so the restored source gets the
+# storage id recorded for the old one: the case a storage id alone does not catch.
+RD="${PGC_DB}_rd"; RD2="${PGC_DB}_rd2"; RDUMP="$PGC_WORKDIR/rollup-1377.sql"
+rd_run() { env PATH="$PGC_BINDIR:$PATH" "$@"; }
+rd_q() { rd_run psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$1" -X -At -c "$2" 2>/dev/null || true; }
+rd_state() {	# rd_state DB SQL -> the SQLSTATE it fails with, ok, or noconnect
+	local out rc
+	out=$(rd_run psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$1" -X -At -v ON_ERROR_STOP=1 \
+		-v VERBOSITY=sqlstate -c "SET ROLE rd_owner" -c "$2" 2>&1 >/dev/null); rc=$?
+	[ $rc -eq 0 ] && { echo ok; return; }
+	[ $rc -eq 2 ] && { echo noconnect; return; }
+	echo "$out" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+rd_as() { rd_run psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$1" -X -At \
+	-c "SET ROLE rd_owner" -c "$2" 2>/dev/null | grep -v '^SET$' | tail -1; }
+rd_hint() {	# rd_hint DB SQL -> the HINT of the error it fails with
+	rd_run psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$1" -X -At -v VERBOSITY=verbose \
+		-c "SET ROLE rd_owner" -c "$2" 2>&1 | sed -n 's/^HINT: *//p' | head -1
+}
+# count|md5, so a mismatch prints two short values rather than every bucket.
+RD_RECOMPUTE="SELECT count(*) || '|' || md5(string_agg(b || ':' || d || ':' || n || ':' || s, ' ' ORDER BY b, d)) FROM
+	(SELECT date_bin('1 hour', ts, '$ORIGIN') b, dev d, count(*) n, sum(v)::numeric s FROM rd.src GROUP BY 1, 2) x"
+RD_ROLLUP="SELECT count(*) || '|' || md5(string_agg(bucket || ':' || dev || ':' || count || ':' || sum_v, ' ' ORDER BY bucket, dev)) FROM rd.r"
+q "CREATE ROLE rd_owner;" >/dev/null
+for db in "$RD" "$RD2"; do q "DROP DATABASE IF EXISTS $db;" >/dev/null; done
+q "CREATE DATABASE $RD;" >/dev/null
+rd_q "$RD" "CREATE EXTENSION pgcolumnar; GRANT USAGE ON SCHEMA pgcolumnar TO rd_owner;
+	CREATE SCHEMA rd AUTHORIZATION rd_owner;" >/dev/null
+rd_as "$RD" "CREATE TABLE rd.src (ts timestamptz, dev int, v bigint) USING pgcolumnar" >/dev/null
+rd_as "$RD" "INSERT INTO rd.src SELECT '2026-06-01'::timestamptz + g * interval '1 min', g % 3, g FROM generate_series(1, 3000) g" >/dev/null
+rd_as "$RD" "SELECT pgcolumnar.create_rollup('r', 'rd.src', 'ts', '1 hour', '$ORIGIN', '{dev}', '{count,sum}', '{*,v}', 'heap')" >/dev/null
+check_num "the rollup to be dumped folds its source" "$(rd_as "$RD" "SELECT pgcolumnar.refresh_rollup('rd.r')")" "3000"
+rd_sid="$(rd_q "$RD" "SELECT pgcolumnar.get_storage_id('rd.src')")"
+rd_run pg_dump -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$RD" -f "$RDUMP"; rd_rc=$?
+check "the database holding a rollup dumps" "$rd_rc" "0"
+
+# Restored into another database.
+q "CREATE DATABASE $RD2;" >/dev/null
+rd_restore() {	# rd_restore DB -> 0, or psql's status and its first error
+	local out
+	out=$(rd_run psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$1" -X -q -v ON_ERROR_STOP=1 -f "$RDUMP" 2>&1 >/dev/null) \
+		&& { echo 0; return; }
+	echo "$? $(grep -m1 'ERROR' <<<"$out")"
+}
+check "the dump restores into another database" "$(rd_restore "$RD2")" "0"
+check "the restored source holds the dumped rows under the storage id recorded for the old one" \
+	"$(rd_q "$RD2" "SELECT count(*) FROM rd.src")|$(rd_q "$RD2" "SELECT pgcolumnar.get_storage_id('rd.src')")" \
+	"3000|$rd_sid"
+check "a restore keeps the rollup's definition" \
+	"$(rd_q "$RD2" "SELECT source::text || ' ' || ts_column || ' ' || width || ' ' || group_by::text || ' ' || agg_functions::text
+	   FROM pgcolumnar.rollup WHERE rollup = 'rd.r'::regclass")" "rd.src ts 01:00:00 {dev} {count,sum}"
+rd_restored="$(rd_q "$RD2" "$RD_ROLLUP")"
+check "the restored rollup reads as a recompute of the restored source" "$rd_restored" "$(rd_q "$RD2" "$RD_RECOMPUTE")"
+check "after a restore into another database its owner's refresh is refused (55000), the rollup untouched" \
+	"$(rd_state "$RD2" "SELECT pgcolumnar.refresh_rollup('rd.r')")|$(rd_q "$RD2" "$RD_ROLLUP")" "55000|$rd_restored"
+check "and the refusal names rebase_rollup" \
+	"$(rd_hint "$RD2" "SELECT pgcolumnar.refresh_rollup('rd.r')" | grep -o 'rebase_rollup' | head -1)" "rebase_rollup"
+check_num "after rebase_rollup a refresh folds nothing" \
+	"$(rd_as "$RD2" "SELECT pgcolumnar.rebase_rollup('rd.r')" >/dev/null; rd_as "$RD2" "SELECT pgcolumnar.refresh_rollup('rd.r')")" "0"
+rd_as "$RD2" "INSERT INTO rd.src SELECT '2026-06-01'::timestamptz + g * interval '1 min', g % 3, g FROM generate_series(3001, 3500) g" >/dev/null
+check_num "and then folds exactly the rows appended after the restore" "$(rd_as "$RD2" "SELECT pgcolumnar.refresh_rollup('rd.r')")" "500"
+check "and the restored rollup equals a full recompute" "$(rd_q "$RD2" "$RD_ROLLUP")" "$(rd_q "$RD2" "$RD_RECOMPUTE")"
+# The restore wrote the catalog row back, and with it the view's dependency on the
+# restored source (#1376): the source cannot be dropped from under its rollup.
+check "after a restore the rollup's source cannot be dropped while the rollup exists (2BP01)" \
+	"$(rd_state "$RD2" "DROP TABLE rd.src")|$(rd_q "$RD2" "SELECT count(*) FROM rd.src")" "2BP01|3500"
+
+# Restored into the same database after DROP EXTENSION: same cluster, same database
+# OID, and the sequence restarted, so again the recorded storage id.
+# The pgcolumnar schema outlives DROP EXTENSION (not a member: alter_am_cleanup.sh),
+# and the dump creates it, so it goes too, as it would before such a restore.
+rd_q "$RD" "DROP EXTENSION pgcolumnar CASCADE; DROP SCHEMA pgcolumnar CASCADE; DROP SCHEMA rd CASCADE;" >/dev/null
+check "the dump restores into its own database after DROP EXTENSION, again under the recorded storage id" \
+	"$(rd_restore "$RD")|$(rd_q "$RD" "SELECT count(*) FROM rd.src")|$(rd_q "$RD" "SELECT pgcolumnar.get_storage_id('rd.src')")" \
+	"0|3000|$rd_sid"
+rd_restored="$(rd_q "$RD" "$RD_ROLLUP")"
+check "after a restore into the same database its refresh is refused (55000), the rollup untouched" \
+	"$(rd_state "$RD" "SELECT pgcolumnar.refresh_rollup('rd.r')")|$(rd_q "$RD" "$RD_ROLLUP")" "55000|$rd_restored"
+for db in "$RD" "$RD2"; do q "DROP DATABASE IF EXISTS $db;" >/dev/null; done
+
 # Refused at creation, each with 22023: the aggregates are structured input
 # checked against the five that combine, never SQL text (#1294 point 11).
 refused_create() { sqlstate "SELECT pgcolumnar.create_rollup('$1', 'src', 'ts', '$2', '$ORIGIN', '{}', '$3', '$4');"; }
@@ -500,9 +589,9 @@ psql_run "DROP ROLE IF EXISTS lr_stranger; CREATE ROLE lr_stranger LOGIN;
 lr_tie="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U lr_stranger -d "$PGC_DB" \
 	-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "CREATE TABLE lr_mine (bucket timestamptz) USING pgcolumnar;
 	CREATE VIEW lr_my_view AS SELECT bucket FROM lr_mine;
-	INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width, origin,
+	INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, source_oid, ts_column, width, origin,
 	  group_by, agg_functions, agg_columns)
-	VALUES ('lr_my_view', 'lr_mine', 'lr_victim', 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');" 2>&1 >/dev/null)"
+	VALUES ('lr_my_view', 'lr_mine', 'lr_victim', 0, 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');" 2>&1 >/dev/null)"
 check "a role cannot tie a rollup row to a table it cannot read (42501, #1376)" \
 	"$(st="$(sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$lr_tie" | head -1)"; echo "${st:-${lr_tie:+other}}")|$(sqlstate "DROP TABLE lr_victim")" "42501|ok"
 # The partials table goes with the view by an AUTO dependency, and a drop deletes AUTO
@@ -520,8 +609,8 @@ as_stranger() {	# as_stranger SQL -> ok, the SQLSTATE it fails with, or other
 psql_run "CREATE TABLE lr_others (bucket timestamptz) USING pgcolumnar; GRANT SELECT ON lr_others TO lr_stranger;
           CREATE TABLE lr_src2 (ts timestamptz, v int) USING pgcolumnar; GRANT SELECT ON lr_src2 TO lr_stranger;"
 lr_row() {	# lr_row VIEW PARTIALS -> a rollup row over lr_src2
-	echo "INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width, origin,
-	  group_by, agg_functions, agg_columns) VALUES ('$1', '$2', 'lr_src2', 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');"
+	echo "INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, source_oid, ts_column, width, origin,
+	  group_by, agg_functions, agg_columns) VALUES ('$1', '$2', 'lr_src2', 0, 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');"
 }
 check "a role cannot name another role's table as its rollup's partials (42501), and that table survives its view's drop (#1376)" \
 	"$(as_stranger "CREATE TABLE lr_p2 (bucket timestamptz) USING pgcolumnar; CREATE VIEW lr_v2 AS SELECT bucket FROM lr_p2; $(lr_row lr_v2 lr_others)")|$(as_stranger "SET client_min_messages = warning; DROP VIEW IF EXISTS lr_v2")|$(q "SELECT count(*) FROM pg_class WHERE relname = 'lr_others'")" \

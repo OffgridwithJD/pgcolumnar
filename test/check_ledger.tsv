@@ -2392,6 +2392,7 @@ rollup	rollup	a refresh at REPEATABLE READ is refused	15;16;17;18;19	2026-10-13	
 rollup	rollup	a refresh folds a bulk append	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	a refresh in a zone with a DST change recomputes a whole day bucket	15;16;17;18;19	2026-10-13	refresh_rollup adding the width in the session's zone;refresh_rollup recomputing every bucket once any group changed;refresh_rollup recording new groups without their time range;refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	a refresh with nothing new folds nothing	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group
+rollup	rollup	a restore keeps the rollup's definition	15;16;17;18;19	2026-10-14	the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
 rollup	rollup	a role cannot name another role's table as its rollup's partials (42501), and that table survives its view's drop (#1376)	15;16;17;18;19	2026-10-14	the rollup trigger with no ownership, kind or no-change checks (8a7fab2, #1406 review)
 rollup	rollup	a role cannot tie a rollup row to a table it cannot read (42501, #1376)	15;16;17;18;19	2026-10-14	a rollup's view, partials and source with no dependency between them, and no catalog cleanup (main before #1376's fix)
 rollup	rollup	a role that cannot read the source cannot create a rollup of it	15;16;17;18;19	2026-10-13	get_storage_id without its SELECT check, so create_rollup no longer refuses a caller that cannot read the source
@@ -2406,8 +2407,12 @@ rollup	rollup	a width with months is refused	15;16;17;18;19	2026-10-13	create_ro
 rollup	rollup	after a delete and an append that straddles its bucket, a refresh counts the new rows once	15;16;17;18;19	2026-10-13	rebase_rollup recording no time ranges;refresh_rollup folding new groups' rows into dirty buckets too;refresh_rollup recomputing every bucket once any group changed;refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	after a delete of rows whose ts is NULL the NULL-bucket rollup equals a full recompute	15;16;17;18;19	2026-10-13	refresh_rollup never dirtying the NULL bucket;refresh_rollup recomputing every bucket once any group changed;refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	after a rebase the next refresh folds exactly the appended rows	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;row_tid mapping 290 rows a block instead of the AM's
+rollup	rollup	after a restore into another database its owner's refresh is refused (55000), the rollup untouched	15;16;17;18;19	2026-10-14	refresh_rollup without the source_oid check: a restored source under the recorded storage id is folded twice;the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
+rollup	rollup	after a restore into the same database its refresh is refused (55000), the rollup untouched	15;16;17;18;19	2026-10-14	refresh_rollup without the source_oid check: a restored source under the recorded storage id is folded twice;the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
+rollup	rollup	after a restore the rollup's source cannot be dropped while the rollup exists (2BP01)	15;16;17;18;19	2026-10-14	the tree without #1406's dependency trigger: a restored rollup does not depend on its source
 rollup	rollup	after an update that moves rows to another bucket the rollup equals a full recompute	15;16;17;18;19	2026-10-13	rebase_rollup recording no time ranges;refresh_rollup recomputing every bucket once any group changed;refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	after compact_rewrite the rollup equals a full recompute	15;16;17;18;19	2026-10-13	rebase_rollup recording no time ranges;refresh_rollup folding new groups' rows into dirty buckets too;refresh_rollup recomputing every bucket once any group changed;refresh_rollup recording new groups without their time range;refresh_rollup refusing any change but appends (phase 1, main before this branch)
+rollup	rollup	after rebase_rollup a refresh folds nothing	15;16;17;18;19	2026-10-14	the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
 rollup	rollup	aggregate functions and columns of different lengths are refused	15;16;17;18;19	2026-10-13	create_rollup without the equal-length check
 rollup	rollup	an aggregate column the source does not have is refused	15;16;17;18;19	2026-10-13	create_rollup without the column-exists check
 rollup	rollup	an aggregate that does not combine is refused	15;16;17;18;19	2026-10-13	create_rollup without the five-function allow-list
@@ -2432,8 +2437,11 @@ rollup	rollup	and the next refresh, with nothing changed since, recomputes nothi
 rollup	rollup	and the recent buckets equal a recompute, while the expired ones keep their history	15;16;17;18;19	2026-10-13	refresh_rollup bucketing with date_trunc, which follows the session's zone;refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup not dropping groups retention retired;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	and the refresh after the rewrite recomputes nothing	15;16;17;18;19	2026-10-13	refresh_rollup not forgetting a changed group that is gone;refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	and the refresh rewrote no partial outside the changed groups' time range	15;16;17;18;19	2026-10-13	refresh_rollup recomputing every bucket once any group changed
+rollup	rollup	and the refusal names rebase_rollup	15;16;17;18;19	2026-10-14	refresh_rollup without the source_oid check: a restored source under the recorded storage id is folded twice;the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
+rollup	rollup	and the restored rollup equals a full recompute	15;16;17;18;19	2026-10-14	refresh_rollup without the source_oid check: a restored source under the recorded storage id is folded twice;the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
 rollup	rollup	and the rollup no longer records the groups retention retired	15;16;17;18;19	2026-10-13	refresh_rollup keeping retired groups in its record
 rollup	rollup	and the rollup still equals a full recompute	15;16;17;18;19	2026-10-13	refresh_rollup combining min with greatest;refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
+rollup	rollup	and then folds exactly the rows appended after the restore	15;16;17;18;19	2026-10-14	the tree before #1377: pgcolumnar.rollup not dumped, no source_oid
 rollup	rollup	another role cannot add a group row to the owner's rollup (42501)	15;16;17;18;19	2026-10-14	the rollup catalog policies given WITH CHECK (true)
 rollup	rollup	another role cannot read the source's groups through rollup_source_groups (42501)	15;16;17;18;19	2026-10-14	rollup_source_groups without its require_caller_select guard
 rollup	rollup	another role sees none of its rollup catalog rows	15;16;17;18;19	2026-10-13	the rollup catalogs without row-level security;the rollup catalogs without their grants
@@ -2453,6 +2461,9 @@ rollup	rollup	premise: the source holds every row	15;16;17;18;19	never	-
 rollup	rollup	rebase_rollup of a table that is not a rollup is refused (42704)	15;16;17;18;19	2026-10-14	rebase_rollup without its not-a-rollup check
 rollup	rollup	rebase_rollup records the source's current row groups	15;16;17;18;19	2026-10-13	rebase_rollup returning 0
 rollup	rollup	refreshes from sessions in different time zones build the same rollup	15;16;17;18;19	2026-10-13	refresh_rollup bucketing with date_trunc, which follows the session's zone
+rollup	rollup	the database holding a rollup dumps	15;16;17;18;19	never	-
+rollup	rollup	the dump restores into another database	15;16;17;18;19	never	-
+rollup	rollup	the dump restores into its own database after DROP EXTENSION, again under the recorded storage id	15;16;17;18;19	never	-
 rollup	rollup	the first refresh folds every row	15;16;17;18;19	2026-10-13	refresh_rollup folding only the first new group
 rollup	rollup	the history rollup folded every row	15;16;17;18;19	2026-10-13	refresh_rollup folding only the first new group
 rollup	rollup	the history rollup holds old buckets	15;16;17;18;19	never	-
@@ -2460,8 +2471,11 @@ rollup	rollup	the next refresh folds the rows committed during the last one, onc
 rollup	rollup	the owner reads its source's groups through the definer helpers	15;16;17;18;19	never	-
 rollup	rollup	the paused refresh folded what was there before it began	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	the refresh after a small append read the source at all	15;16;17;18;19	never	-
+rollup	rollup	the restored rollup reads as a recompute of the restored source	15;16;17;18;19	never	-
+rollup	rollup	the restored source holds the dumped rows under the storage id recorded for the old one	15;16;17;18;19	never	-
 rollup	rollup	the rollup holds rows before the rewrite	15;16;17;18;19	never	-
 rollup	rollup	the rollup table exists with the documented columns	15;16;17;18;19	never	-
+rollup	rollup	the rollup to be dumped folds its source	15;16;17;18;19	never	-
 rollup	rollup	the second refresh of the NULL-key rollup folded the append	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	the zone rollups hold a row per key of the recompute	15;16;17;18;19	2026-10-13	refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	two refreshes started together fold the new rows once between them	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup without the self-conflicting lock;row_tid mapping 290 rows a block instead of the AM's
