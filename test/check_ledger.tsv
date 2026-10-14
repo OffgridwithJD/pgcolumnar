@@ -2080,6 +2080,7 @@ rollup	rollup	and after the refresh that ran beside an insert the rollup equals 
 rollup	rollup	and after the small append the rollup equals a full recompute	15;16;17;18;19	2026-10-13	refresh_rollup combining min with greatest;refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup recording the folded groups from a fresh read after the fold;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	and after two refreshes started together the rollup equals a full recompute	15;16;17;18;19	2026-10-13	refresh_rollup combining min with greatest;refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup recording the folded groups from a fresh read after the fold;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	and cannot refresh it	15;16;17;18;19	2026-10-13	the rollup catalogs without row-level security;the rollup catalogs without their grants
+rollup	rollup	and its unqualified UPDATE and DELETE reach none of the owner's catalog rows	15;16;17;18;19	2026-10-14	a permissive UPDATE policy on pgcolumnar.rollup and DELETE policy on rollup_group, USING (true);the rollup catalog policies given WITH CHECK (true)
 rollup	rollup	and leaves the rollup as it was	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group
 rollup	rollup	and leaves the rollup's rows alone	15;16;17;18;19	2026-10-13	rebase_rollup clearing the rollup's rows
 rollup	rollup	and no refused rollup left a table behind	15;16;17;18;19	2026-10-13	create_rollup allowing * with any function;create_rollup without the equal-length check;create_rollup without the months refusal
@@ -2092,14 +2093,18 @@ rollup	rollup	and the refresh after the rewrite recomputes nothing	15;16;17;18;1
 rollup	rollup	and the refresh rewrote no partial outside the changed groups' time range	15;16;17;18;19	2026-10-13	refresh_rollup recomputing every bucket once any group changed
 rollup	rollup	and the rollup no longer records the groups retention retired	15;16;17;18;19	2026-10-13	refresh_rollup keeping retired groups in its record
 rollup	rollup	and the rollup still equals a full recompute	15;16;17;18;19	2026-10-13	refresh_rollup combining min with greatest;refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
+rollup	rollup	another role cannot add a group row to the owner's rollup (42501)	15;16;17;18;19	2026-10-14	the rollup catalog policies given WITH CHECK (true)
+rollup	rollup	another role cannot read the source's groups through rollup_source_groups (42501)	15;16;17;18;19	2026-10-14	rollup_source_groups without its require_caller_select guard
 rollup	rollup	another role sees none of its rollup catalog rows	15;16;17;18;19	2026-10-13	the rollup catalogs without row-level security;the rollup catalogs without their grants
 rollup	rollup	each row group's TID range holds exactly that group's rows	15;16;17;18;19	2026-10-13	row_tid mapping 290 rows a block instead of the AM's
+rollup	rollup	nor its retired groups through rollup_source_retired (42501)	15;16;17;18;19	2026-10-14	rollup_source_retired without its require_caller_select guard
 rollup	rollup	premise: and the fixture has NULL-key and NULL-bucket groups	15;16;17;18;19	never	-
 rollup	rollup	premise: compact_rewrite rewrote a row group	15;16;17;18;19	never	-
 rollup	rollup	premise: expire retired the group in bucket D alone and kept the one that shares it	15;16;17;18;19	never	-
 rollup	rollup	premise: expire retired the group the delete thinned	15;16;17;18;19	never	-
 rollup	rollup	premise: expire retired the old row groups	15;16;17;18;19	never	-
 rollup	rollup	premise: pgcolumnar.vacuum gave the source's row groups new identities	15;16;17;18;19	never	-
+rollup	rollup	premise: the owner's rollup has group rows another role could reach	15;16;17;18;19	never	-
 rollup	rollup	premise: the rollup functions exist	15;16;17;18;19	never	-
 rollup	rollup	premise: the rollup holds partials the delete below cannot reach	15;16;17;18;19	never	-
 rollup	rollup	premise: the source holds every row	15;16;17;18;19	never	-
@@ -2109,6 +2114,7 @@ rollup	rollup	the first refresh folds every row	15;16;17;18;19	2026-10-13	refres
 rollup	rollup	the history rollup folded every row	15;16;17;18;19	2026-10-13	refresh_rollup folding only the first new group
 rollup	rollup	the history rollup holds old buckets	15;16;17;18;19	never	-
 rollup	rollup	the next refresh folds the rows committed during the last one, once	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup recording the folded groups from a fresh read after the fold;row_tid mapping 290 rows a block instead of the AM's
+rollup	rollup	the owner reads its source's groups through the definer helpers	15;16;17;18;19	never	-
 rollup	rollup	the paused refresh folded what was there before it began	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	the refresh after a small append read the source at all	15;16;17;18;19	never	-
 rollup	rollup	the rollup holds rows before the rewrite	15;16;17;18;19	never	-
