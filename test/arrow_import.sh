@@ -690,6 +690,9 @@ else
 			"a time32 in seconds decodes to the time it holds (#865)" \
 			"a time32 in milliseconds decodes to the time it holds (#865)" \
 			"premise: a well-formed import reports 00000, so the probe reads success" \
+			"a date32 before PostgreSQL's first date is refused" \
+			"a date32 past PostgreSQL's last date is refused" \
+			"a date64 past PostgreSQL's last date is refused" \
 			"a second count that overflows on scaling is refused, not wrapped" \
 			"a timestamp before PostgreSQL's range is refused" \
 			"a time past midnight is refused" \
