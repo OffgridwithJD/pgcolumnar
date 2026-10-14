@@ -2389,4 +2389,15 @@ suites_not_covered 231
 #     never         2281 + 1 = 2282
 #     dated          717 + 8 = 725
 #     2282 + 725 == 3007
+#
+# #1341, row_tid's floor (OffgridwithJD): 2282 -> 2282. One new rollup arm, dated by the
+# floor removed: row_tid(0) then crashed the backend (PG17), so the arm runs last in
+# the suite and as a pytest test of its own, where a crash takes nothing else down.
+# Five-major runs: rollup 83/83 on 15-19, and 105/105 on PG17 and PG18 after the
+# rebase onto f2bd5f1, which brought in 22 checks.
+#
+#     ledger rows   3007 + 1 = 3008
+#     never         2282     = 2282
+#     dated          725 + 1 =  726
+#     2282 + 726 == 3008
 checks_never_observed_red 2282
