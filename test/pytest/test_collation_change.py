@@ -26,7 +26,8 @@ def _one(conn, sql):
 def _same(conn, sql, columnar, heap):
     c = _one(conn, sql.replace("%T", columnar))
     h = _one(conn, sql.replace("%T", heap))
-    return "same" if c == h else f"columnar [{c}] heap [{h}]"
+    # An answer is required (#1339): None on both sides is not the same answer.
+    return "same" if c is not None and c == h else f"columnar [{c}] heap [{h}]"
 
 
 def _value(g):
@@ -41,7 +42,10 @@ def test_a_collation_change_without_a_rewrite(pgc_conn, expect):
                       " AND collencoding IN (-1, pg_char_to_encoding(current_setting('server_encoding')))"
                       " ORDER BY collname LIMIT 1")
     if coll is None:
-        expect.cannot_run("no en_US collation", name="the server has no en_US collation to change a C column to")
+        # A reason cannot_run knows (#1339): "no en_US collation" is not one, and it
+        # raised VacuityError instead of recording the test as unrunnable.
+        expect.cannot_run("MISSING_DEPENDENCY", "no en_US collation",
+                          name="the server has no en_US collation to change a C column to")
         return
     expect.text(_one(conn, f"SELECT ('c' < 'Q' COLLATE \"{coll}\")::text || '|' || ('c' < 'Q' COLLATE \"C\")::text"),
                 "true|false", "premise: the new collation orders a lower-case letter before an upper-case one that C puts first")
@@ -54,6 +58,12 @@ def test_a_collation_change_without_a_rewrite(pgc_conn, expect):
             cur.execute(f"INSERT INTO {t} SELECT g, {_value('g')} FROM generate_series(1, {4 * GROUP}) g")
     expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('xc')"),
                4, "premise: the columnar table has several row groups")
+    # The extent existed, and held C's bound (#1339): the arm after the change accepts
+    # "none", so without this a column_extent() that never returns a row passed it.
+    expect.text(_one(conn, "SELECT coalesce((SELECT minimum || '|' || maximum"
+                           " FROM pgcolumnar.column_extent('xc', 's')), 'none')"),
+                _one(conn, "SELECT min(s) || '|' || max(s) FROM xh"),
+                "before the change the column's extent is the C collation's bound")
     before = _one(conn, "SELECT pg_relation_filenode('xc')")
     for t in ("xc", "xh"):
         conn.execute(f'ALTER TABLE {t} ALTER COLUMN s TYPE text COLLATE "{coll}"')

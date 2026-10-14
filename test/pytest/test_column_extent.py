@@ -127,7 +127,7 @@ def test_writers_concurrent_aborted_and_prepared(pgc_own_db, pgc_cluster, expect
     _run(conn, "COPY (SELECT '2018-03-03'::timestamptz + g * interval '13 hours', g"
                f" FROM generate_series(1, 5200) g) TO '{path}' WITH (FORMAT text)")
     expect.num(_one(conn, f"SELECT pgcolumnar.parallel_copy('cw', '{path}', 3)"), 5200,
-               "premise: parallel_copy's loaders, flushing into one table at once, all commit")
+               "parallel_copy's loaders, flushing into one table at once, all commit")
     expect.text(_ext(conn, "cw", "ts"), _truth(conn, "cw", "ts"), "and the extent covers what they loaded")
 
     with psycopg.connect(dsn) as c:
@@ -221,9 +221,11 @@ def test_a_shrink_is_recomputed_never_guessed(pgc_own_db, expect):
     _run(conn, "INSERT INTO ex SELECT now() - interval '700 days' + g * interval '90 s', g FROM generate_series(1, 2500) g",
          "INSERT INTO ex SELECT now() - interval '2 days' + g * interval '7 s', g FROM generate_series(1, 2500) g")
     before = _ext(conn, "ex", "ts")
+    # The extent was there before expire (#1339): "it did move" means nothing otherwise.
+    expect.text(before, _truth(conn, "ex", "ts"), "before expire the extent covers the table")
     retired = _one(conn, "SELECT pgcolumnar.expire('ex')")
     expect.text("yes" if (retired or 0) >= 1 else f"no ({retired})", "yes",
-                "premise: expire retires the old row groups with the extent in place")
+                "expire retires the old row groups with the extent in place")
     after = _ext(conn, "ex", "ts")
     expect.text(after, _truth(conn, "ex", "ts"), "after expire the extent is recomputed to the data that is left")
     expect.text("yes" if before != after else "no", "yes",
@@ -235,7 +237,7 @@ def test_a_shrink_is_recomputed_never_guessed(pgc_own_db, expect):
          "DELETE FROM cr WHERE v > 4200 OR v <= 650")
     rewritten = _one(conn, "SELECT pgcolumnar.compact_rewrite('cr', 0.1)")
     expect.text("yes" if (rewritten or 0) >= 1 else f"no ({rewritten})", "yes",
-                "premise: compact_rewrite rewrites the groups the deletes thinned")
+                "compact_rewrite rewrites the groups the deletes thinned")
     expect.text(_ext(conn, "cr", "ts"), _truth(conn, "cr", "ts"), "after compact_rewrite the extent is the live rows'")
 
     _run(conn, "CREATE TABLE vr (ts timestamptz, v int) USING pgcolumnar")
@@ -274,7 +276,7 @@ def test_housekeeping_and_privilege(pgc_own_db, pgc_cluster, expect):
         _run(conn, f"INSERT INTO hk VALUES ('2025-01-01'::timestamptz + interval '{k} hours', {k})")
     rows = _one(conn, f"SELECT count(*) FROM pgcolumnar.column_extent WHERE storage_id = {_sid(conn, 'hk')}"
                       " AND column_index = 0")
-    expect.text("yes" if rows <= 9 else f"no ({rows})", "yes",
+    expect.text("yes" if 1 <= rows <= 9 else f"no ({rows})", "yes",
                 "fifty committing writers leave a bounded number of extent rows")
     expect.text(_ext(conn, "hk", "ts"), _truth(conn, "hk", "ts"), "and the extent still covers all fifty")
     old = _sid(conn, "hk")
@@ -284,6 +286,9 @@ def test_housekeeping_and_privilege(pgc_own_db, pgc_cluster, expect):
     _run(conn, "CREATE TABLE dr (ts timestamptz) USING pgcolumnar",
          "INSERT INTO dr SELECT now() FROM generate_series(1, 10)")
     old = _sid(conn, "dr")
+    # Rows to remove (#1339): a count of zero after the DROP proves nothing without it.
+    expect.text(str(_one(conn, f"SELECT count(*) > 0 FROM pgcolumnar.column_extent WHERE storage_id = {old}")),
+                "True", "before DROP the table has extent rows to remove")
     _run(conn, "DROP TABLE dr")
     expect.num(_one(conn, f"SELECT count(*) FROM pgcolumnar.column_extent WHERE storage_id = {old}"), 0,
                "DROP TABLE removes them")
@@ -305,3 +310,8 @@ def test_housekeeping_and_privilege(pgc_own_db, pgc_cluster, expect):
                 "the extent catalog is not readable by an ordinary role (it holds column values)")
     expect.text(as_role("SELECT * FROM pgcolumnar.column_extent('public.priv', 'ts')"), "42501",
                 "nor is a table's extent through the function, without SELECT on the table")
+    # The control (#1339): given SELECT, the same role reads it. Without this, a
+    # function refused to everyone passed the arm above.
+    _run(conn, "GRANT SELECT ON priv TO ce_py")
+    expect.text(as_role("SELECT * FROM pgcolumnar.column_extent('public.priv', 'ts')"), "ok",
+                "and with SELECT on the table the same role reads its extent")
