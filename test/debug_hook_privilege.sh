@@ -55,8 +55,10 @@ msg_as() {
 }
 
 # --- premises: bound, callable, and the role really runs its statements ------
-check "premise: the owner can call the advance hook (no-op advance)" \
-	"$(sqlstate_as postgres "SELECT public.dbg_advance('owned', 0)")" ""
+# An arm, not a premise: a hook that refused every caller reddens it (#1381 review).
+# Expected as "ok" rather than an empty SQLSTATE, so an empty capture cannot pass.
+check "the owner can call the advance hook (no-op advance)" \
+	"$(st="$(sqlstate_as postgres "SELECT public.dbg_advance('owned', 0)")"; echo "${st:-ok}")" "ok"
 
 check "premise: the peon role runs its own statements" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U peon -d "$PGC_DB" -qtA -c 'SELECT current_user;')" \

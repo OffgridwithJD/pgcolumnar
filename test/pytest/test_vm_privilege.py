@@ -79,7 +79,7 @@ def test_the_visibility_map_entry_points(pgc_conn, expect):
         cur.execute(f"GRANT EXECUTE ON FUNCTION pgcolumnar.vm_is_visible(regclass,int) TO {EXEC}")
     nblocks = _one(conn, "SELECT pg_relation_size('vmvictim')/8192")
 
-    expect.num(_one(conn, "SELECT count(*) FROM vmvictim"), 10000, "premise: the fixture has 10000 live rows")
+    expect.num(_one(conn, "SELECT count(*) FROM vmvictim"), 10000, "the fixture has 10000 live rows")
     expect.text(str(_one(conn, f"SELECT rolsuper FROM pg_roles WHERE rolname = '{NONE}'")), "False",
                 "premise: the test role is not a superuser")
     expect.text(str(_one(conn, f"SELECT has_table_privilege('{NONE}', 'vmvictim', 'SELECT')")), "False",
@@ -93,8 +93,8 @@ def test_the_visibility_map_entry_points(pgc_conn, expect):
                            " WHERE c.oid = 'vmheap'::regclass"), "heap",
                 "premise: the heap fixture really is heap, or the #748 arm is vacuous")
     expect.text(str(_one(conn, "SELECT pgcolumnar.vm_is_visible('vmvictim'::regclass, 0)")), "False",
-                "premise: no all-visible bit is set yet")
-    expect.at_least(nblocks, 2, "premise: the fixture spans more than one block")
+                "no all-visible bit is set yet")
+    expect.at_least(nblocks, 2, "the fixture spans more than one block")
 
     def ios_count():
         with conn.cursor() as cur:

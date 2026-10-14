@@ -10,6 +10,7 @@ separates the two orderings: without it both end in 42501.
 The tables live in this test's schema, and the role is granted USAGE on it, so a
 42501 is never "permission denied for schema" passing for the owner check.
 """
+import threading
 import time
 
 import pytest
@@ -122,10 +123,25 @@ def test_maintenance_refuses_a_non_owner_before_its_lock(pgc_cluster, pgc_conn, 
         expect.text(_heap_outcome(pgc_cluster, schema, "SELECT pgcolumnar.compact('heapvictim'::regclass)"), "owner",
                     "compact does the same, which is the behaviour drop_projection now matches")
 
+        # WATCHED WHILE A REFUSED PROBE RUNS: asked after every probe had exited this
+        # could not fail, because a timed-out request leaves the queue with its session
+        # (#1381 review). A caller refused before its lock is gone at once; one that
+        # queued is seen waiting for its whole lock_timeout.
+        t = threading.Thread(target=_outcome, args=(pgc_cluster, schema, "SELECT pgcolumnar.vacuum('victim'::regclass)"))
+        t.start()
+        queued_max = 0
+        while t.is_alive():
+            with pgc_conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+                            f" WHERE l.relation = 'victim'::regclass AND a.usename = '{UNPRIV}' AND NOT l.granted")
+                queued_max = max(queued_max, cur.fetchone()[0])
+            time.sleep(0.1)
+        t.join()
+        expect.num(queued_max, 0, "the refused caller never queued a lock request on victim, watched while it ran")
         with pgc_conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
-                        f" WHERE l.relation = 'victim'::regclass AND a.usename = '{UNPRIV}' AND NOT l.granted")
-            expect.num(cur.fetchone()[0], 0, "the refused caller left no lock request queued on victim")
+            cur.execute("SELECT count(*) FROM pg_locks WHERE relation = 'victim'::regclass"
+                        " AND mode = 'AccessExclusiveLock' AND granted")
+            expect.num(cur.fetchone()[0], 1, "premise: the lock is still held after the last probe")
     finally:
         holder.rollback()
         holder.close()

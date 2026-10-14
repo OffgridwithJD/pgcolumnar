@@ -47,8 +47,9 @@ def test_the_debug_mutators_are_owner_only(pgc_own_db, pgc_cluster, expect):
         cur.execute("INSERT INTO owned VALUES (1), (2)")
 
     # ---- premises: bound, callable, and the role really runs its statements
+    # An arm, not a premise: a hook that refused every caller reddens it (#1381 review).
     expect.text(_as(pgc_cluster, db, "postgres", "SELECT public.dbg_advance('owned', 0)")[0] or "ok", "ok",
-                "premise: the owner can call the advance hook (no-op advance)")
+                "the owner can call the advance hook (no-op advance)")
     expect.text(str(_as(pgc_cluster, db, PEON, "SELECT current_user")[2]), PEON,
                 "premise: the peon role runs its own statements")
 
@@ -59,9 +60,14 @@ def test_the_debug_mutators_are_owner_only(pgc_own_db, pgc_cluster, expect):
     state, msg, _ = _as(pgc_cluster, db, PEON, "SELECT public.dbg_setver('owned', 99, 0)")
     expect.text(state, "42501", "peon cannot overwrite another owner's metapage version (42501)")
     expect.num(1 if "must be owner" in msg else 0, 1, "and that refusal is the owner gate too")
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM owned")
-        expect.num(cur.fetchone()[0], 2, "the gated table still reads (version untouched by the refused calls)")
+    import psycopg
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM owned")
+            still = cur.fetchone()[0]
+    except psycopg.Error:
+        still = -1  # unreadable: a red arm by name, not a crash (#1381 review)
+    expect.num(still, 2, "the gated table still reads (version untouched by the refused calls)")
 
     # ---- mirrors: the gate is ownership, not superuser-ness
     with conn.cursor() as cur:

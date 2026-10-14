@@ -6933,13 +6933,13 @@ The pytest twin of `test/debug_hook_privilege.sh` (#707, ported for #1341), ever
 
 ## 113. test_vacuum_lock_privilege.py: maintenance refuses a non-owner before taking its lock
 
-The pytest twin of `test/vacuum_lock_privilege.sh` (#749, ported for #1341), every check by the shell's name. A superuser connection holds ACCESS EXCLUSIVE on `victim`, and a non-owner calls vacuum, vacuum_sorted, cluster, add_projection, drop_projection, recluster, compact_rewrite and compact with lock_timeout 4s. Refused by ownership first is 42501 at once; an ownership check after the lock request is a wait that ends 55P03. A non-owner asking about a heap relation learns only that it is not the owner, and no lock request of its is left queued. The owner's own calls are the controls. The role holds USAGE on the test's schema, so no 42501 is a schema refusal.
+The pytest twin of `test/vacuum_lock_privilege.sh` (#749, ported for #1341), every check by the shell's name. A superuser connection holds ACCESS EXCLUSIVE on `victim`, and a non-owner calls vacuum, vacuum_sorted, cluster, add_projection, drop_projection, recluster, compact_rewrite and compact with lock_timeout 4s. Refused by ownership first is 42501 at once; an ownership check after the lock request is a wait that ends 55P03. A non-owner asking about a heap relation learns only that it is not the owner, and a refused vacuum is watched in `pg_locks` while it runs: it never queues. The lock is still held after the last probe. The owner's own calls are the controls. The role holds USAGE on the test's schema, so no 42501 is a schema refusal.
 
 ### Every test
 
 | test | what it holds |
 | --- | --- |
-| `test_maintenance_refuses_a_non_owner_before_its_lock` | the premises, the eight refusals under contention, the two heap-relation refusals, no queued lock request, and the owner controls |
+| `test_maintenance_refuses_a_non_owner_before_its_lock` | the premises, the eight refusals under contention, the two heap-relation refusals, no lock request queued while a refused probe runs, the lock still held, and the owner controls |
 
 ## 114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap
 

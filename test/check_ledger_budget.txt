@@ -2187,4 +2187,27 @@ suites_not_covered 234
 #     never         2048 + 51 = 2099
 #     dated          637 +  7 = 644
 #     2099 + 644 == 2743
-checks_never_observed_red 2099
+#
+# #1341, the #1381 review of those three (OffgridwithJD): 2099 -> 2086. One new check,
+# "premise: the lock is still held after the last probe", arrives never. Fourteen rows
+# are dated for the first time, by four mutations:
+#   - vacuum checking ownership after its lock: the queued-lock arm, now watched while
+#     a refused probe runs (asked after every probe had exited it could not fail, and
+#     main's suite survives this mutation on it), and vacuum's own arm;
+#   - every maintenance entry point checking ownership after its lock: the eight
+#     contention arms and drop_projection's type disclosure. Main's 30 s holder had
+#     expired by the eighth probe, so compact's arm stayed green there; the holder now
+#     holds until it is released;
+#   - the advance hook refusing everyone: the owner's call (renamed from a premise)
+#     and the peon's own-table mirror;
+#   - set_metapage_version without its owner check: its 42501 arm, its owner-gate
+#     message arm and the gated table's read.
+# Five rows are renamed, keeping their history: the queued-lock arm, and four product
+# checks that carried the premise prefix (the advance-hook owner call, and vm's live
+# row count, empty visibility map and block count).
+#
+#     ledger rows   2743 + 1 = 2744
+#     never         2099 +  1 - 14 = 2086
+#     dated          644 + 14      = 658
+#     2086 + 658 == 2744
+checks_never_observed_red 2086

@@ -99,8 +99,10 @@ nblocks="$(q "SELECT pg_relation_size('vmvictim')/8192;")"
 
 # ---- premises -----------------------------------------------------------------
 # Each of these makes a later assertion mean something. If any fails, the run is
-# void rather than green.
-check_num "premise: the fixture has 10000 live rows" \
+# void rather than green. The three without the prefix read the columnar code under
+# test (its scan, its visibility map, its storage size), so they are arms (#1381
+# review): a premise is a fact about the fixture alone.
+check_num "the fixture has 10000 live rows" \
 	"$(q "SELECT count(*) FROM vmvictim;")" 10000
 check "premise: the test role is not a superuser" \
 	"$(q "SELECT rolsuper FROM pg_roles WHERE rolname='t_vmnone';")" "f"
@@ -112,9 +114,9 @@ check "premise: the boundary victim is columnar, where the gate still applies" \
 	"$(q "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vmvictim';")" "pgcolumnar"
 check "premise: the heap fixture really is heap, or the #748 arm is vacuous" \
 	"$(q "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vmheap';")" "heap"
-check "premise: no all-visible bit is set yet" \
+check "no all-visible bit is set yet" \
 	"$(q "SELECT pgcolumnar.vm_is_visible('vmvictim'::regclass,0);")" "f"
-check "premise: the fixture spans more than one block" \
+check "the fixture spans more than one block" \
 	"$([ "${nblocks:-0}" -gt 1 ] && echo yes || echo no)" "yes"
 
 # tail -1 is not cosmetic. psql -At -c with several statements echoes a command
