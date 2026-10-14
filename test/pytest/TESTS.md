@@ -6235,6 +6235,7 @@ restored byte-identical.
 | --- | --- |
 | `test_expire_retires_expired_groups_and_keeps_the_straddling_one` | the feature, and the straddling group that constrains it |
 | `test_expire_refuses_what_it_cannot_honour` | #1341: a non-owner holding DELETE (`42501`), a retention column that is not a time type (`42804`) and a dropped one (`42703`) are refused with every row still there, on tables whose rows are all past retention; the owner's `expire` is the control that retires them |
+| `test_a_half_declaration_is_no_retention` | #1341: a retention column without an interval, or an interval without a column, is accepted by `set_options` and refused by `expire` with `55000`, every aged row kept |
 | `test_a_null_retention_value_keeps_its_group` | a live NULL the maximum cannot speak for |
 | `test_an_index_only_scan_does_not_return_retired_rows` | the visibility-map bits over a group `expire` removed |
 | `test_a_non_positive_retention_is_refused` | a cutoff in the future would retire live groups: `22023`, with a positive control |
