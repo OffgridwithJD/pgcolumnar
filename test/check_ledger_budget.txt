@@ -2150,4 +2150,16 @@ suites_not_covered 237
 #     never         2041 + 27 - 18 = 2050
 #     dated          615 + 18      =  633
 #     2050 + 633 == 2683
-checks_never_observed_red 2050
+#
+# #1341, objstore_credentials gets its pytest twin (OffgridwithJD): 2050 -> 2048. No new
+# rows. Two arms are dated for the first time: every mapping allowed the ambient
+# credentials (carol then read through the environment without her mapping), and the
+# validator letting a non-superuser set credentials_required false. Two shell arms
+# that expected an empty SQLSTATE now expect "ok", so an empty capture cannot pass.
+# Five-major runs: 25/25 on 15-19, the twin passing with pyarrow required.
+#
+#     ledger rows   2683     = 2683
+#     never         2050 - 2 = 2048
+#     dated          633 + 2 = 635
+#     2048 + 635 == 2683
+checks_never_observed_red 2048
