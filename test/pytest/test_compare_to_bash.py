@@ -100,6 +100,7 @@ COMPLETE = ["advisory_lock_class",
             "catalog_scan_index",
             "collation_change",
             "column_extent",
+            "debug_hook_privilege",
             "differential",
             "encode_post_codec",
             "entry_point_privilege",
@@ -148,7 +149,9 @@ COMPLETE = ["advisory_lock_class",
             "tier_partition",
             "timeseries_recipes",
             "ttl_expire",
+            "vacuum_lock_privilege",
             "validity_elision",
+            "vm_privilege",
             "zonemap_boundaries"]
 
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim

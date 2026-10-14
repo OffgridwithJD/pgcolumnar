@@ -363,6 +363,16 @@ column_extent	column_extent	the extent of ty.s is the data's min and max, in the
 column_extent	column_extent	the extent of ty.ts is the data's min and max, in the type's order	15;16;17;18;19	2026-10-14	a writer that finds no complete extent does not recompute one;no extent row is ever written (PgColumnarExtentPreCommit returns at once)
 column_extent	column_extent	while the column that was there from the start still has one	15;16;17;18;19	2026-10-14	a writer that finds no complete extent does not recompute one;no extent row is ever written (PgColumnarExtentPreCommit returns at once)
 column_extent	column_extent	without the extent rows the planner falls back to one zone_map scan	15;16;17;18;19	2026-10-13	the planner's zone-map fallback removed: with no complete extent it reads nothing and bounds nothing
+debug_hook_privilege	debug_hook_privilege	and that refusal is the owner gate too	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	and the refusal is the owner gate, not an EXECUTE denial	15;16;17;18;19	2026-10-14	pgcolumnar_debug_advance_reserved_offset without its owner check
+debug_hook_privilege	debug_hook_privilege	backend alive	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	peon cannot advance another owner's reserved offset (42501)	15;16;17;18;19	2026-10-14	pgcolumnar_debug_advance_reserved_offset without its owner check
+debug_hook_privilege	debug_hook_privilege	peon cannot overwrite another owner's metapage version (42501)	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	peon may advance its OWN table (gate is ownership)	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	peon may even brick its OWN scratch table's version (gate is ownership)	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	premise: the owner can call the advance hook (no-op advance)	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	premise: the peon role runs its own statements	15;16;17;18;19	never	-
+debug_hook_privilege	debug_hook_privilege	the gated table still reads (version untouched by the refused calls)	15;16;17;18;19	never	-
 differential	differential	agg avg	15;16;17;18;19	never	-
 differential	differential	agg count	15;16;17;18;19	never	-
 differential	differential	agg minmax	15;16;17;18;19	never	-
@@ -2658,6 +2668,24 @@ ttl_expire	ttl_expire	the retention is recorded where the other options live	15;
 ttl_expire	ttl_expire	with the extent, expire retires the same groups	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
 ttl_expire	ttl_expire	without the extent the same expire probes every group's zone map	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	without the extent, expire retires the aged groups	15;16;17;18;19	2026-10-14	expire returning 0 whatever it retired
+vacuum_lock_privilege	vacuum_lock_privilege	add_projection refuses a non-owner before taking its lock (#749)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	cluster refuses a non-owner before taking the exclusive lock	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	compact does the same, which is the behaviour drop_projection now matches	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	compact refuses a non-owner before taking its lock (#749)	15;16;17;18;19	2026-10-14	compact checks ownership after taking its lock
+vacuum_lock_privilege	vacuum_lock_privilege	compact_rewrite refuses a non-owner before taking its lock (#749)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	drop_projection refuses a non-owner before taking its lock (#749)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	drop_projection tells a non-owner nothing about the relation type (#749)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	premise: an AccessExclusiveLock on victim is held before the probes	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	premise: the caller can open a session	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	premise: the caller is not the owner of victim	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	premise: victim is a columnar table	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	recluster refuses a non-owner before taking its lock (#749)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	the owner can still add and drop a projection (#749 control)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	the owner can still compact the table (#749 control)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	the owner can still vacuum the table	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	the refused caller left no lock request queued on victim	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	vacuum refuses a non-owner before taking the exclusive lock	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	vacuum_sorted refuses a non-owner before taking the exclusive lock	15;16;17;18;19	never	-
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
 validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
 validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-
@@ -2683,3 +2711,33 @@ validity_elision	validity_elision	the nulls column preserves its null count	15;1
 validity_elision	validity_elision	the nulls column reads back exactly what the heap holds	15;16;17;18;19	2026-10-13	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the reader returning row 5 of every row group as NULL;the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	the second fixture holds nulls, so its bitmap is load-bearing	15;16;17;18;19	2026-09-23	the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	while a column with nulls still stores one, sized one bit per row	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	a role with only schema USAGE is stopped by the REVOKE	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	an unprivileged role is refused by vm_is_visible	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	an unprivileged role is refused by vm_selftest	15;16;17;18;19	2026-10-14	vm_selftest without its owner check
+vm_privilege	vm_privilege	and it still agrees with the sequential scan (#748)	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	coverage scan found the vm functions (not an empty scan)	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	index-only and sequential scans agree after the attempt	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	no all-visible bit was set on block 0 by the unprivileged role	15;16;17;18;19	2026-10-14	vm_selftest without its owner check
+vm_privilege	vm_privilege	premise: no all-visible bit is set yet	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the boundary victim is columnar, where the gate still applies	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the fixture has 10000 live rows	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the fixture spans more than one block	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the heap fixture really is heap, or the #748 arm is vacuous	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the heap sweep covered more than one block	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the index-only scan is correct BEFORE anything is attempted	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the query under test really is an Index Only Scan	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the test role cannot read the victim	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the test role does reach the schema (so it meets the C gate)	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	premise: the test role is not a superuser	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	the C ownership check names ownership	15;16;17;18;19	2026-10-14	vm_selftest without its owner check
+vm_privilege	vm_privilege	the granted-but-not-owner role reaches the C gate, not the SQL grant	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	the heap index-only scan still returns only live rows after the sweep (#748)	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	the index-only scan still returns only live rows	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	the owner can still call vm_is_visible	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	the owner can still call vm_selftest	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	the same call on a columnar relation is still accepted (#748 control)	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	vm entry point is covered by this boundary test: vm_is_visible	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	vm entry point is covered by this boundary test: vm_selftest	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	vm_is_visible refuses a heap relation even for its owner (#748)	15;16;17;18;19	never	-
+vm_privilege	vm_privilege	vm_selftest did not report success to the unprivileged role	15;16;17;18;19	2026-10-14	vm_selftest without its owner check
+vm_privilege	vm_privilege	vm_selftest refuses a heap relation even for its owner (#748)	15;16;17;18;19	never	-

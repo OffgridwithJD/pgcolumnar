@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 237
+suites_not_covered 234
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2173,4 +2173,18 @@ suites_not_covered 237
 #     never         2048     = 2048
 #     dated          635 + 2 = 637
 #     2048 + 637 == 2685
-checks_never_observed_red 2048
+#
+# #1341, three privilege suites seeded with their pytest twins (OffgridwithJD): 2048 ->
+# 2099, and suites_not_covered 237 -> 234. None had rows. debug_hook_privilege (10),
+# vacuum_lock_privilege (18) and vm_privilege (30) enter with every check from
+# five-major runs, all green on each of 15-19. Seven are dated: the debug advance hook
+# without its owner check (two), compact checking ownership after its lock (one), and
+# vm_selftest without its owner check (four). vm_privilege's owner controls now run
+# on a table of their own, so that mutation's attack no longer reddens them. The
+# other 51 arrive never.
+#
+#     ledger rows   2685 + 58 = 2743
+#     never         2048 + 51 = 2099
+#     dated          637 +  7 = 644
+#     2099 + 644 == 2743
+checks_never_observed_red 2099

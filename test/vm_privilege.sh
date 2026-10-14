@@ -182,10 +182,16 @@ check "an unprivileged role is refused by vm_is_visible" \
 
 # ---- the other direction: the owner must still be able to use them -------------
 # Without this the suite would pass if the fix simply broke both functions.
+# ON A TABLE OF ITS OWN (#1341): on vmvictim, an attack that got through had already
+# set block 0's bit, so the owner's call reported f and this control reddened for the
+# attack, not for the owner.
+psql_run "CREATE TABLE vmown (id int) USING pgcolumnar;
+          INSERT INTO vmown SELECT g FROM generate_series(1, 20000) g;
+          DELETE FROM vmown WHERE id % 2 = 0;"
 check "the owner can still call vm_selftest" \
-	"$(q "SELECT pgcolumnar.vm_selftest('vmvictim'::regclass, 0);")" "t"
+	"$(q "SELECT pgcolumnar.vm_selftest('vmown'::regclass, 0);")" "t"
 check "the owner can still call vm_is_visible" \
-	"$(q "SELECT pgcolumnar.vm_is_visible('vmvictim'::regclass, 0);")" "t"
+	"$(q "SELECT pgcolumnar.vm_is_visible('vmown'::regclass, 0);")" "t"
 
 # ---- #748: a non-columnar relation is refused, whoever asks ---------------------
 #

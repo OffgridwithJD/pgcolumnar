@@ -157,6 +157,9 @@ behaviour, the source of that number is named.
 - [109. test_entry_point_privilege.py: every relation-taking entry point has a decided privilege bar](#109-test_entry_point_privilegepy-every-relation-taking-entry-point-has-a-decided-privilege-bar)
 - [110. test_am_contracts.py: contracts the access method owes core DML and transactions](#110-test_am_contractspy-contracts-the-access-method-owes-core-dml-and-transactions)
 - [111. test_objstore_credentials.py: object-store credentials live on a user mapping, and the environment is a privilege](#111-test_objstore_credentialspy-object-store-credentials-live-on-a-user-mapping-and-the-environment-is-a-privilege)
+- [112. test_debug_hook_privilege.py: the debug metadata mutators are owner-only](#112-test_debug_hook_privilegepy-the-debug-metadata-mutators-are-owner-only)
+- [113. test_vacuum_lock_privilege.py: maintenance refuses a non-owner before taking its lock](#113-test_vacuum_lock_privilegepy-maintenance-refuses-a-non-owner-before-taking-its-lock)
+- [114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap](#114-test_vm_privilegepy-the-visibility-map-entry-points-are-owner-only-and-refuse-heap)
 
 ## 1. How to read a test in here
 
@@ -6917,3 +6920,33 @@ The pytest twin of `test/objstore_credentials.sh` (#393 M4, ported for #1341), e
 | test | what it holds |
 | --- | --- |
 | `test_object_store_credentials` | placement, per-user resolution, the half-credential refusals and the request count behind them, no leak, and ambient credentials as a privilege across the restart |
+
+## 112. test_debug_hook_privilege.py: the debug metadata mutators are owner-only
+
+The pytest twin of `test/debug_hook_privilege.sh` (#707, ported for #1341), every check by the shell's name. The two debug hooks that mutate storage metadata are bound as the test suites bind them and probed by a non-owner on its own login: each is refused 42501 with "must be owner", which tells the owner gate from an EXECUTE denial, and the table still reads. The mirrors show the gate is ownership: the same role may mutate its own tables. A private database, because the last mirror leaves a table that cannot be dropped.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_debug_mutators_are_owner_only` | the premises, both refusals by SQLSTATE and message, the gated table intact, and both mirrors |
+
+## 113. test_vacuum_lock_privilege.py: maintenance refuses a non-owner before taking its lock
+
+The pytest twin of `test/vacuum_lock_privilege.sh` (#749, ported for #1341), every check by the shell's name. A superuser connection holds ACCESS EXCLUSIVE on `victim`, and a non-owner calls vacuum, vacuum_sorted, cluster, add_projection, drop_projection, recluster, compact_rewrite and compact with lock_timeout 4s. Refused by ownership first is 42501 at once; an ownership check after the lock request is a wait that ends 55P03. A non-owner asking about a heap relation learns only that it is not the owner, and no lock request of its is left queued. The owner's own calls are the controls. The role holds USAGE on the test's schema, so no 42501 is a schema refusal.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_maintenance_refuses_a_non_owner_before_its_lock` | the premises, the eight refusals under contention, the two heap-relation refusals, no queued lock request, and the owner controls |
+
+## 114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap
+
+The pytest twin of `test/vm_privilege.sh` (#748, ported for #1341), every check by the shell's name. `vm_selftest` sets an all-visible bit, which on a block holding dead rows makes an index-only scan return them. A role holding only schema USAGE is stopped by the REVOKE; a role granted EXECUTE reaches the C ownership check and is refused there, on every block. No bit is set, and the index-only scan still agrees with a sequential scan. On a heap relation both functions refuse even the owner with 42809, and a sweep over every heap block leaves its index-only scan correct. A scan of the install script checks every `vm_*` function is one this test probes.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_visibility_map_entry_points` | the premises, the two refusal layers and the damage they prevent, the owner controls, the heap refusals and sweep, and the coverage scan |
