@@ -99,12 +99,10 @@ def test_every_relation_taking_entry_point_has_a_decided_bar(pgc_conn, pgc_clust
     allfns = _words(conn, f"SELECT DISTINCT p.proname {in_ext}")
 
     # ---- premises: the enumeration is real
-    expect.text("yes" if installed >= 20 else "no", "yes",
-                "premise: the extension is installed and C entry points were found")
+    expect.at_least(installed, 20, "premise: the extension is installed and C entry points were found")
     expect.text("yes" if relfns else "no", "yes", "premise: at least one relation-taking entry point was found")
     src_syms = _install_symbols()
-    expect.text("yes" if len(src_syms) >= 20 else "no", "yes",
-                "premise: the install script declares MODULE_PATHNAME symbols at all")
+    expect.at_least(len(src_syms), 20, "premise: the install script declares MODULE_PATHNAME symbols at all")
     expect.text("same" if src_syms == symbols else "differs: " + " ".join(sorted(src_syms ^ symbols)), "same",
                 "the catalog and the install script agree on the symbol set")
 
