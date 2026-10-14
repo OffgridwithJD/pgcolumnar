@@ -166,8 +166,11 @@ check "and still exportable by it" \
 owner_rows="$(q 'SELECT count(*) FROM rls_t;')"
 check "the OWNER can still read the RLS table's storage (RLS_NONE_ENV)" \
 	"$(q "SELECT count(*) FROM pgcolumnar.read_projection('rls_t','p1');" 2>&1 | head -1)" "$owner_rows"
-check "and the owner can still export it" \
-	"$([ -n "$(q "SELECT pgcolumnar.export_parquet('rls_t','$OUT/owner.parquet');" 2>&1)" ] && echo ran || echo ran)" "ran"
+# Measured as the rows the export holds, read back: both branches of the old test
+# here echoed "ran", so a refused owner export passed it.
+q "SELECT pgcolumnar.export_parquet('rls_t','$OUT/owner.parquet');" >/dev/null 2>&1
+check_num "and the owner can still export it" \
+	"$([ -s "$OUT/owner.parquet" ] && q "SELECT count(*) FROM pgcolumnar.read_parquet('$OUT/owner.parquet') AS (id int, owner_name text, ssn text);" 2>&1 | head -1 || echo absent)" "$owner_rows"
 
 # ---- FORCE ROW LEVEL SECURITY reaches the owner too -------------------------
 #
