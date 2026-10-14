@@ -503,6 +503,10 @@ def test_a_named_column_that_does_not_exist_is_refused(pgc_conn, expect):
     column named beside it gets no statistics either. The control names only the
     real column, so "no statistics" is not a table that never gets any."""
     import psycopg
+    readable, _raw, major = _major(pgc_conn)
+    if not readable or major < 18:
+        _decline_unnamed(expect, major)
+        return
     with pgc_conn.cursor() as cur:
         cur.execute("CREATE TABLE af_unk (a int, b text) USING pgcolumnar")
         cur.execute("INSERT INTO af_unk SELECT g, 'v'||g FROM generate_series(1, 5000) g")
