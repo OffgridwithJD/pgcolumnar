@@ -629,4 +629,6 @@ guard_tests 429
 # kind and the --partition mode), by collection over the cluster files on this branch.
 # cluster_tests 532 -> 533 for #1339's test_a_timestamp_retention_column_uses_the_sessions_local_time
 # in test_ttl_expire.py, by collection over the cluster files on this branch.
-cluster_tests 533
+# cluster_tests 533 -> 534 for #1341's test_expire_refuses_what_it_cannot_honour in
+# test_ttl_expire.py, by collection over the cluster files on this tree.
+cluster_tests 534

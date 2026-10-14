@@ -388,6 +388,82 @@ def test_a_non_positive_retention_is_refused(pgc_conn, expect):
         "control: and the rows are all still there")
 
 
+def test_expire_refuses_what_it_cannot_honour(pgc_conn, expect):
+    """A non-owner, a retention column that is not a time type, and a dropped one.
+
+    Each refused table holds 3,000 rows ten days old, every one past a one-day
+    retention, so a missing refusal is not a quiet no-op: it is retired groups. The
+    row count beside each SQLSTATE is what says nothing was dropped (#1341). ttl_ctl
+    is the same fixture as ttl_own on its own table, so the owner's control cannot be
+    reached by whatever a missing refusal did to ttl_own.
+    """
+    with pgc_conn.cursor() as cur:
+        cur.execute("DO $$ BEGIN CREATE ROLE ttl_nobody; "
+                    "EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+        cur.execute("GRANT USAGE ON SCHEMA pgcolumnar TO ttl_nobody")
+        cur.execute("SELECT current_schema()")
+        cur.execute(f'GRANT USAGE ON SCHEMA "{cur.fetchone()[0]}" TO ttl_nobody')
+        for t, ty in (("ttl_own", "timestamptz"), ("ttl_ctl", "timestamptz"), ("ttl_int", "int"),
+                      ("ttl_gone", "timestamptz")):
+            cur.execute(f"CREATE TABLE {t} (id int, ts {ty}, ts2 timestamptz) USING pgcolumnar")
+            cur.execute(f"SELECT pgcolumnar.set_options('{t}', stripe_row_limit => 1000)")
+        for t in ("ttl_own", "ttl_ctl"):
+            cur.execute(f"INSERT INTO {t} SELECT g, now() - interval '10 days', now()"
+                        " FROM generate_series(1,3000) g")
+        cur.execute("INSERT INTO ttl_int SELECT g, g - 1500, now() FROM generate_series(1,3000) g")
+        cur.execute("INSERT INTO ttl_gone SELECT g, now() - interval '10 days', now() - interval '10 days'"
+                    " FROM generate_series(1,3000) g")
+    def count(t):
+        return _one(pgc_conn, f"SELECT count(*) FROM {t}")
+
+    def groups(t):
+        return _one(pgc_conn, "SELECT count(*) FROM pgcolumnar.row_group"
+                              " WHERE storage_id = pgcolumnar.get_storage_id(%s::regclass)", (t,))
+
+    lay = "".join(f"{groups(t)}:{count(t)} " for t in ("ttl_ctl", "ttl_gone", "ttl_int", "ttl_own"))
+    expect.text(lay, "3:3000 3:3000 3:3000 3:3000 ",
+                "premise: each table holds 3000 rows in three row groups")
+
+    # Ownership: DELETE on the table is not enough, expire drops whole row groups.
+    with pgc_conn.cursor() as cur:
+        for t in ("ttl_own", "ttl_ctl"):
+            cur.execute(f"SELECT pgcolumnar.set_options('{t}', ttl_column => 'ts', ttl_interval => '1 day')")
+        cur.execute("GRANT SELECT, DELETE ON ttl_own TO ttl_nobody")
+        cur.execute("SET ROLE ttl_nobody")
+    try:
+        state = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_own')")
+    finally:
+        with pgc_conn.cursor() as cur:
+            cur.execute("RESET ROLE")
+    expect.text(f"{state}|{count('ttl_own')}", "42501|3000",
+                "a role that does not own the table cannot expire it, even holding DELETE (42501)")
+    retired = _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_ctl')")
+    expect.text(f"{retired}|{count('ttl_ctl')}", "3|0",
+                "control: and its owner's expire retires every aged group")
+
+    # Type: set_options takes a column of any type, and expire is what refuses one
+    # that is not date, timestamp or timestamptz.
+    expect.text(
+        _sqlstate(pgc_conn, "SELECT pgcolumnar.set_options('ttl_int', ttl_column => 'ts',"
+                            " ttl_interval => '1 day')") or "accepted",
+        "accepted", "set_options accepts an int retention column, so the refusal is expire's")
+    int_state = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_int')")
+    expect.text(f"{int_state}|{count('ttl_int')}", "42804|3000",
+                "expire refuses a retention column that is not a time type (42804)")
+
+    # A dropped retention column: the declaration outlives it, and expire refuses
+    # rather than reading some other column.
+    with pgc_conn.cursor() as cur:
+        cur.execute("SELECT pgcolumnar.set_options('ttl_gone', ttl_column => 'ts', ttl_interval => '1 day')")
+        cur.execute("ALTER TABLE ttl_gone DROP COLUMN ts")
+    expect.text(_one(pgc_conn, "SELECT ttl_column FROM pgcolumnar.options"
+                               " WHERE regclass = 'ttl_gone'::regclass"), "ts",
+                "premise: the declaration still names the dropped column")
+    gone_state = _sqlstate(pgc_conn, "SELECT pgcolumnar.expire('ttl_gone')")
+    expect.text(f"{gone_state}|{count('ttl_gone')}", "42703|3000",
+                "expire refuses a retention column that no longer exists (42703)")
+
+
 def test_a_deleted_null_stops_pinning_its_group(pgc_conn, expect):
     """`null_count` is recorded at WRITE time and never revised.
 

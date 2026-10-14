@@ -1871,4 +1871,18 @@ suites_not_covered 246
 #     never         1798 - 1 = 1797
 #     dated          555 + 2 =  557
 #     1797 + 557 == 2354
-checks_never_observed_red 1797
+#
+# #1341, what expire refuses (OffgridwithJD): 1797 -> 1801. Seven new ttl_expire checks
+# on tables whose every row is past retention, so a missing refusal drops rows. Three
+# arms are dated by a mutation of expire: no owner check (a non-owner holding DELETE
+# then retired all three groups), and a silent return 0 in place of the 42703 and of
+# the 42804 refusal. Four arrive never: two premises on the fixture, set_options
+# accepting an int retention column, and the owner's control, which has its own table
+# so no refusal's mutation can reach it. Five-major runs on the files merged with
+# #1353 and #1355: 77/77 on 15-19.
+#
+#     ledger rows   2354 + 7 = 2361
+#     never         1797 + 4 = 1801
+#     dated          557 + 3 =  560
+#     1801 + 560 == 2361
+checks_never_observed_red 1801
