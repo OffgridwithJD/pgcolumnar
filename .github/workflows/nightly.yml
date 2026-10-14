@@ -419,7 +419,7 @@ jobs:
         run: |
           set -euo pipefail
           v=$(apt-cache policy \
-                postgresql-18 postgresql-server-dev-18 \
+                postgresql-18 postgresql-server-dev-18 postgresql-18-partman postgresql-18-hll postgresql-18-tdigest \
                 liblz4-dev libzstd-dev zlib1g-dev python3-pip lcov \
               | awk '/Candidate:/ {print $2}' | sort)
           # $ImageOS, from the shell, where it actually has a value. Reported
@@ -449,7 +449,7 @@ jobs:
           mkdir -p "$HOME/apt-archives/partial"
           sudo timeout 600 apt-get -o Acquire::Retries=5 \
             -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
-            postgresql-18 postgresql-server-dev-18 \
+            postgresql-18 postgresql-server-dev-18 postgresql-18-partman postgresql-18-hll postgresql-18-tdigest \
             liblz4-dev libzstd-dev zlib1g-dev python3-pip lcov 2>&1 | tee /tmp/apt-install.log
           # Installed with sudo because the suites run under sudo; a plain
           # pip3 install lands in ~/.local where root cannot see it, which is how

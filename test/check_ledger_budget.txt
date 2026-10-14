@@ -1955,4 +1955,16 @@ suites_not_covered 244
 #     never         1895 - 1 = 1894
 #     dated          571 + 1 =  572
 #     1894 + 572 == 2466
-checks_never_observed_red 1894
+#
+# #1382, the nightly's coverage job installs the extension packages (jdatcmd):
+# 1894 -> 1895. harness_selftest part 640 enters with six checks from five-major
+# runs (1245/1245 on each of 15-19). Five are dated: the job check by main's
+# nightly.yml (coverage lacked postgresql-18-partman, -hll and -tdigest), and the
+# detector, unreadable-file, no-suite-job and job-set checks by four mutations of
+# the part itself. The premise that both workflow files exist arrives never.
+#
+#     ledger rows   2466 + 6 = 2472
+#     never         1894 + 1 = 1895
+#     dated          572 + 5 =  577
+#     1895 + 577 == 2472
+checks_never_observed_red 1895

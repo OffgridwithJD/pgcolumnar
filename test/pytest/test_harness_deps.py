@@ -83,6 +83,9 @@ NO_CLUSTER = [
     # #1344: drives `make -n` on the Makefile with no pg_config. Needs no cluster
     # and no driver; it never builds and never runs the shell harness.
     "test_build_needs_pg_config.py",
+    # #1382: reads the two workflow files as text, with its own Python reader. Needs
+    # no cluster and no driver, and never runs the shell harness.
+    "test_every_suite_job_installs_the_extensions.py",
     # The classifier's own controls, split out of this file so the job whose file
     # list IS this list actually runs them. This file cannot be in the list: it
     # hands cluster-bound file names to pytest, so it needs what they need.
@@ -1282,6 +1285,10 @@ SHELL_REFERENCES = {
         "with its own Python reader, to find an EXIT trap that replaces the one setup "
         "arms (#1321). It never sources or executes either: the rule is about what "
         "the shell text says, so the text is the only place to read it",
+    "test_every_suite_job_installs_the_extensions.py":
+        "names the matrix and coverage runners' file names as data, to recognise a "
+        "workflow step that runs the suites (#1382). It reads only the two workflow "
+        "files and never reads or executes the runners themselves",
 }
 
 _SHELL_NAMES = re.compile(

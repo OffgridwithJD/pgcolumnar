@@ -151,6 +151,7 @@ behaviour, the source of that number is named.
 - [103. test_collation_change.py: a collation change without a rewrite leaves columnar answering as heap does](#103-test_collation_changepy-a-collation-change-without-a-rewrite-leaves-columnar-answering-as-heap-does)
 - [104. test_build_needs_pg_config.py: a build with no pg_config refuses, it does not wait on stdin](#104-test_build_needs_pg_configpy-a-build-with-no-pg_config-refuses-it-does-not-wait-on-stdin)
 - [105. test_import_export_privilege.py: import and export check the table's privilege, serial and parallel](#105-test_import_export_privilegepy-import-and-export-check-the-tables-privilege-serial-and-parallel)
+- [106. test_every_suite_job_installs_the_extensions.py: every job that runs the suites installs the extension packages](#106-test_every_suite_job_installs_the_extensionspy-every-job-that-runs-the-suites-installs-the-extension-packages)
 
 ## 1. How to read a test in here
 
@@ -6829,3 +6830,20 @@ The pytest twin of `test/import_export_privilege.sh` (#559, #566), with the para
 | `test_a_table_the_caller_holds_no_grant_on_is_refused` | the seven deny arms, serial and parallel, in the shell's order; then `victim` keeps exactly its rows and no file of it was written |
 | `test_the_owner_is_not_refused` | the owner's own exports, storage id and import are not refused |
 | `test_the_owner_runs_the_parallel_twins` | the owner's `parallel_copy` loads its 50 rows, and its `parallel_export_parquet` writes some |
+
+## 106. test_every_suite_job_installs_the_extensions.py: every job that runs the suites installs the extension packages
+
+The pytest half of selftest part 640 (#1382). Suites such as `partman_columnar` and `approx_aggregates` need a PGDG extension package (`postgresql-N-partman`, `-hll`, `-tdigest`) and record a FAIL without it. The nightly's coverage job ran those suites without the packages, and the nightly went red. So the list is derived, not trusted: every job that runs the suites must install every extension package any such job installs.
+
+READ, WITH ITS OWN READER. Python reads `ci.yml` and `nightly.yml` line by line, where the part uses awk. A job runs the suites when a line that is not a comment calls `run_all_versions.sh` or `run_coverage.sh`, or runs `pytest -q` in a job whose key names a cluster. The detector names a workflow it cannot read or finds no suite job in, so an empty answer can only mean nothing is missing. The check names match the part's.
+
+Needs no cluster and no driver.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_both_workflows_are_present` | both workflow files exist (premise) |
+| `test_the_detector_names_what_it_finds_and_what_it_cannot_read` | on workflows written to fail, the detector names the job that lacks a package, a workflow it cannot read, and a workflow with no suite job |
+| `test_the_suite_jobs_are_the_five_known` | the suite-running jobs are exactly `ci.yml`'s `pytest-cluster` and `suites`, and `nightly.yml`'s `coverage`, `pytest-cluster` and `suites`, so a rename is red |
+| `test_every_suite_job_installs_every_extension_package` | no suite job lacks a package another installs |
