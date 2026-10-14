@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 244
+suites_not_covered 243
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -1967,4 +1967,16 @@ suites_not_covered 244
 #     never         1894 + 1 = 1895
 #     dated          572 + 5 =  577
 #     1895 + 577 == 2472
-checks_never_observed_red 1895
+#
+# #1341, objstore_credentials seeded, with the half-credential arms (OffgridwithJD):
+# 1895 -> 1918, and suites_not_covered 244 -> 243. The suite had no rows. It enters
+# with all 25 checks from five-major runs (25/25 on each of 15-19). Two are dated by
+# the user mapping's credential pairing check removed: an access key alone then
+# crashes the backend, and a secret alone gets a different 28000 ("no credentials"),
+# which the arm's message tells apart. The other 23 arrive never.
+#
+#     ledger rows   2472 + 25 = 2497
+#     never         1895 + 23 = 1918
+#     dated          577 +  2 = 579
+#     1918 + 579 == 2497
+checks_never_observed_red 1918
