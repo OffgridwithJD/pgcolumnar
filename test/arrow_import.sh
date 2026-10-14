@@ -347,7 +347,39 @@ with ipc.new_stream(pa.OSFile(sys.argv[1], 'wb'), t.schema) as w:
     w.write_table(t)
 PY
 	psql_run "CREATE TABLE ri_d (c text) USING pgcolumnar;"
-	expect_error "reject dictionary-encoded file" "SELECT pgcolumnar.import_arrow('ri_d', '$DICTF');"
+	# BY SQLSTATE AND MESSAGE (#1341). expect_error accepted any error, and a
+	# dictionary column's int32 indices into a text target can fail on their own, so
+	# the refusal of the DictionaryBatch itself was never what the arm saw.
+	ai_refusal() {	# ai_refusal SQL -> "SQLSTATE message" of its error, or "ok"
+		local out
+		out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+			-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -c "$1" 2>&1)"
+		case "$out" in *ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\): \(.*\)$/\1 \2/p' <<<"$out" | head -1;; *) echo ok;; esac
+	}
+	check "reject dictionary-encoded file" \
+		"$(ai_refusal "SELECT pgcolumnar.import_arrow('ri_d', '$DICTF')")" \
+		"0A000 columnar.import_arrow does not support dictionary-encoded Arrow files"
+
+	# A compressed record-batch body (#1341): the reader takes uncompressed bodies
+	# only, and must say so rather than decode compressed bytes as values.
+	ZIPF="$PGC_WORKDIR/compressed.arrows"
+	ZIPCODEC="$(python3 - "$ZIPF" <<'PY'
+import sys, pyarrow as pa, pyarrow.ipc as ipc
+codec = next((c for c in ('zstd', 'lz4') if pa.Codec.is_available(c)), None)
+if codec:
+    t = pa.table({'a': pa.array(range(1000), pa.int64())})
+    opts = ipc.IpcWriteOptions(compression=codec)
+    with ipc.new_stream(pa.OSFile(sys.argv[1], 'wb'), t.schema, options=opts) as w:
+        w.write_table(t)
+print(codec or 'none')
+PY
+)"
+	psql_run "CREATE TABLE ri_z (a bigint) USING pgcolumnar;"
+	check "premise: this pyarrow writes a compressed body (zstd or lz4)" \
+		"$(case "$ZIPCODEC" in zstd|lz4) echo codec;; *) echo "none ($ZIPCODEC)";; esac)" "codec"
+	check "reject a compressed record-batch body" \
+		"$(ai_refusal "SELECT pgcolumnar.import_arrow('ri_z', '$ZIPF')")|$(q 'SELECT count(*) FROM ri_z')" \
+		"0A000 columnar.import_arrow does not support compressed Arrow bodies|0"
 
 	# ---- temporal carriers and units (#864, #865) -----------------------------
 	#
@@ -645,6 +677,8 @@ PY
 else
 	for _ai_types in \
 			"reject dictionary-encoded file" \
+			"premise: this pyarrow writes a compressed body (zstd or lz4)" \
+			"reject a compressed record-batch body" \
 			"premise: the exporter's own timestamp unit still imports correctly" \
 			"premise: and its own time unit does too" \
 			"premise: and a date32 carrier, which shares Arrow's tag 8 with date64" \
