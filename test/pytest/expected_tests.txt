@@ -653,4 +653,7 @@ guard_tests 433
 # test_ttl_expire.py, by collection over the cluster files on this tree.
 # cluster_tests 550 -> 551 for #1341's test_entry_point_privilege.py, the twin of
 # entry_point_privilege.sh: one test, by collection over the cluster files on this tree.
-cluster_tests 551
+#
+# cluster_tests 551 -> 558 for #1341's test_am_contracts.py, the twin of
+# test/am_contracts.sh: seven tests, by collection over the cluster files on this tree.
+cluster_tests 558

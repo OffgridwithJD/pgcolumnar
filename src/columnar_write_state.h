@@ -36,6 +36,7 @@ extern bool PgColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 extern void PgColumnarForgetWriteStateForRelation(Oid relid);
 
 extern void PgColumnarFlushAllPendingWrites(void);
+extern void PgColumnarFlushPendingWritesOfSubXact(SubTransactionId subid);
 
 extern void PgColumnarDiscardAllPendingWrites(void);
 

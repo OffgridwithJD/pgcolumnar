@@ -155,6 +155,7 @@ behaviour, the source of that number is named.
 - [107. test_fdw_plan_privilege.py: planning a foreign table reads no server file for a role the scan would refuse](#107-test_fdw_plan_privilegepy-planning-a-foreign-table-reads-no-server-file-for-a-role-the-scan-would-refuse)
 - [108. test_arrow_import.py: import_arrow round trips, reads a foreign file, and refuses what it cannot decode](#108-test_arrow_importpy-import_arrow-round-trips-reads-a-foreign-file-and-refuses-what-it-cannot-decode)
 - [109. test_entry_point_privilege.py: every relation-taking entry point has a decided privilege bar](#109-test_entry_point_privilegepy-every-relation-taking-entry-point-has-a-decided-privilege-bar)
+- [110. test_am_contracts.py: contracts the access method owes core DML and transactions](#110-test_am_contractspy-contracts-the-access-method-owes-core-dml-and-transactions)
 
 ## 1. How to read a test in here
 
@@ -6887,3 +6888,21 @@ The pytest twin of `test/entry_point_privilege.sh` (#569, ported for #1341), eve
 | test | what it holds |
 | --- | --- |
 | `test_every_relation_taking_entry_point_has_a_decided_bar` | the enumeration premises, the symbol-set agreement, the bucket and class counts, the five 42501 refusals with their owner premises, and the four file siblings refused at the table |
+
+## 110. test_am_contracts.py: contracts the access method owes core DML and transactions
+
+The pytest twin of `test/am_contracts.sh` (#1341). Each section is a promise from `docs/` or from core's table-AM interface that no test exercised. The first is `INSERT ... ON CONFLICT`: `docs/limitations.md` said `DO NOTHING` works, and on any table with a unique index it raised `0A000`, because the access method refused speculative insertion. Speculative insertion now inserts the row as an ordinary row, and withdraws it with a delete mark when a concurrent inserter won the key.
+
+THE WITHDRAWAL IS REACHED ONLY BY A RACE. When one session holds a key uncommitted, the executor's pre-check sees it and waits, so it never inserts. A row is withdrawn only when another session inserts the key between this one's pre-check and its insert. So the third test races eight sessions on clock-derived keys. Measured: 0 duplicate keys clean; 407 to 507 with the withdrawal disabled.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_insert_on_conflict` | `DO NOTHING` skips a duplicate and inserts the rest, with and without a conflict target; a key twice in one statement goes in once; `DO UPDATE` is refused (`0A000`) on a conflicting row and changes nothing, and inserts when nothing conflicts |
+| `test_insert_on_conflict_withdraws_a_row_a_concurrent_insert_beat` | a `DO NOTHING` racing another session's uncommitted insert of the same key waits, then skips it: one row, the holder's, by scan and by the unique index |
+| `test_insert_on_conflict_racing_sessions_leave_each_key_once` | eight sessions racing `DO NOTHING` on the same keys leave each key once, with no error; a premise requires that they contended |
+| `test_a_truncate_that_rolls_back_restores_every_row` | a `TRUNCATE` rolled back at transaction level, and one rolled back to a savepoint, restore every row, with the primary key still answering and refusing; rows the parent buffered before the savepoint survive too |
+| `test_an_aborted_inner_block_keeps_the_outer_statements_rows` | an outer `INSERT` and an outer `DELETE` whose expression calls a function with an aborted EXCEPTION block keep heap's answer. Before #1341's fix the INSERT kept 1 row of 5000. The same loss through a read inside the block is #1360 |
+| `test_an_insert_racing_an_uncommitted_delete_of_its_key` | an insert of a key whose delete (or key-changing update) is uncommitted waits, then fails with 23505 if the delete rolls back and succeeds if it commits: never two rows with the key. Before #1341's fix the rollback left two |
+| `test_an_index_built_after_a_delete_serves_an_older_snapshot` | a REPEATABLE READ snapshot from before a committed DELETE still finds the row through an index built after it (an Index Scan, asserted), and a new snapshot does not; a UNIQUE index still builds over a key whose other holder is deleted. Before #1341's fix the old snapshot's lookup found 0 |

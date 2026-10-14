@@ -44,6 +44,8 @@ extern bool PgColumnarReadFoldColumn(PgColumnarReadState *readState, int attidx,
 								   const char **validity, const char **packed,
 								   int16 *attlen, const uint32 **vecRawLen);
 
+extern void PgColumnarReadSetEmitDeleted(PgColumnarReadState *readState, bool emit);
+extern bool PgColumnarReadLastRowDeleted(PgColumnarReadState *readState);
 extern void PgColumnarReadSetProjection(PgColumnarReadState *readState,
 										Bitmapset *projectedColumns);
 

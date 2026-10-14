@@ -652,8 +652,10 @@ other than where the feature is used:
   partitions. Drop the constraint first if the table must be
   columnar. A conversion of the referencing side is permitted. A conversion of a
   table that no foreign key refers to is also permitted.
-- `INSERT ... ON CONFLICT DO UPDATE` takes a row lock and raises the same error.
-  `ON CONFLICT DO NOTHING` does not, and works.
+- `INSERT ... ON CONFLICT DO UPDATE` raises the same error when a conflicting row
+  exists, because updating it takes a row lock. When no row conflicts, it inserts.
+  `ON CONFLICT DO NOTHING` takes no row lock and works, with or without a conflict
+  target.
 
 `CREATE TABLE` refuses an unlogged columnar table for the same reason. Both cases
 follow one rule. This access method refuses a configuration that it cannot

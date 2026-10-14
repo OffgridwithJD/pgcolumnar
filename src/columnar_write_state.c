@@ -3865,6 +3865,34 @@ PgColumnarFlushAllPendingWrites(void)
 }
 
 /*
+ * PgColumnarFlushPendingWritesOfSubXact
+ *		Flush only the write states the given subtransaction owns (#1341).
+ *
+ *		A flush writes catalog rows under the subtransaction that is CURRENT, not
+ *		the one that buffered the rows. So flushing an enclosing statement's buffer
+ *		while a child subtransaction is current -- a statement inside a plpgsql
+ *		EXCEPTION block ends -- attributes the parent's rows to the child, and the
+ *		block's rollback takes them away. Measured before this: an INSERT ... SELECT
+ *		f(g) of 5000 rows, where f's EXCEPTION block wrote a columnar table and rolled
+ *		back, kept one row. A parent's buffer waits for its own statement's end.
+ */
+void
+PgColumnarFlushPendingWritesOfSubXact(SubTransactionId subid)
+{
+	ListCell   *lc;
+
+	foreach(lc, PgColumnarWriteStates)
+	{
+		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
+
+		if (writeState->subid != subid)
+			continue;
+		pgcolumnar_flush_row_group(writeState);
+		flush_ws_projections(writeState);
+	}
+}
+
+/*
  * PgColumnarDiscardAllPendingWrites
  *		Forget all pending write states. The backing memory is freed with the
  *		transaction context, so we only clear our static references.

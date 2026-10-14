@@ -440,6 +440,25 @@ PgColumnarFlushAllDeleteVectors(void)
 }
 
 /*
+ * PgColumnarFlushDeleteVectorsOfSubXact
+ *		Flush only the delete buffers the given subtransaction owns, for the reason
+ *		PgColumnarFlushPendingWritesOfSubXact gives (#1341).
+ */
+void
+PgColumnarFlushDeleteVectorsOfSubXact(SubTransactionId subid)
+{
+	ListCell   *lc;
+
+	foreach(lc, PgColumnarDeleteVectorBuffers)
+	{
+		DeleteVectorBuffer *buf = (DeleteVectorBuffer *) lfirst(lc);
+
+		if (buf->subid == subid)
+			delete_vector_flush_buffer(buf);
+	}
+}
+
+/*
  * PgColumnarDiscardAllDeleteVectors
  *		Forget all pending delete buffers (transaction end).
  */

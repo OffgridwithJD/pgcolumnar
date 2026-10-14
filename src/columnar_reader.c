@@ -292,6 +292,9 @@ struct PgColumnarReadState
 	 */
 	char	   *nativeDeleteMask;
 	uint32		nativeDeleteMaskLen;
+	/* return deleted rows too, flagged; the index build asks for this (#1341) */
+	bool		emitDeleted;
+	bool		lastRowDeleted;
 
 	MemoryContext readContext;		/* whole scan */
 	MemoryContext stripeContext;	/* reset per stripe */
@@ -3453,11 +3456,33 @@ pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 		*rowNumber = rs->nativeGroup->firstRowNumber + rs->rowInGroup;
 		rs->rowInGroup++;
 
-		if (deleted)
+		if (deleted && !rs->emitDeleted)
 			continue;			/* row deleted: cursors advanced, do not emit */
 
+		rs->lastRowDeleted = deleted;
 		return true;
 	}
+}
+
+/*
+ * PgColumnarReadSetEmitDeleted
+ *		Return rows the snapshot sees as deleted as well, and let the caller ask
+ *		PgColumnarReadLastRowDeleted which ones they were (#1341). The index build
+ *		needs them: a row deleted after an older snapshot began is still visible to
+ *		that snapshot, so a new index must hold it, as heap's build holds a
+ *		recently-dead tuple. Only the unfiltered path honours this; a filter never
+ *		sees a deleted row.
+ */
+void
+PgColumnarReadSetEmitDeleted(PgColumnarReadState *readState, bool emit)
+{
+	readState->emitDeleted = emit;
+}
+
+bool
+PgColumnarReadLastRowDeleted(PgColumnarReadState *readState)
+{
+	return readState->lastRowDeleted;
 }
 
 bool
