@@ -612,9 +612,9 @@ def test_a_rollup_and_its_source_are_dropped_together(pgc_conn, pgc_cluster, exp
             c.execute(f'SET search_path TO "{schema}", public')
             c.execute("CREATE TABLE lr_mine (bucket timestamptz) USING pgcolumnar")
             c.execute("CREATE VIEW lr_my_view AS SELECT bucket FROM lr_mine")
-            c.execute("INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column,"
+            c.execute("INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, source_oid, ts_column,"
                       " width, origin, group_by, agg_functions, agg_columns) VALUES ('lr_my_view', 'lr_mine',"
-                      f" 'lr_victim', 0, 'ts', '1 hour', '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')")
+                      f" 'lr_victim', 0, 0, 'ts', '1 hour', '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')")
             c.commit()
         tie = "ok"
     except psycopg.Error as e:
@@ -632,9 +632,9 @@ def test_a_rollup_and_its_source_are_dropped_together(pgc_conn, pgc_cluster, exp
         cur.execute("GRANT SELECT ON lr_src2 TO lr_stranger_py")
 
     def row(view, partials):
-        return ("INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width,"
-                f" origin, group_by, agg_functions, agg_columns) VALUES ('{view}', '{partials}', 'lr_src2', 0,"
-                f" 'ts', '1 hour', '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')")
+        return ("INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, source_oid, ts_column,"
+                f" width, origin, group_by, agg_functions, agg_columns) VALUES ('{view}', '{partials}', 'lr_src2', 0,"
+                f" 0, 'ts', '1 hour', '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')")
 
     def as_stranger(*stmts):
         try:

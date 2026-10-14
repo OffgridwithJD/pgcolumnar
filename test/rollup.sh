@@ -589,9 +589,9 @@ psql_run "DROP ROLE IF EXISTS lr_stranger; CREATE ROLE lr_stranger LOGIN;
 lr_tie="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U lr_stranger -d "$PGC_DB" \
 	-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "CREATE TABLE lr_mine (bucket timestamptz) USING pgcolumnar;
 	CREATE VIEW lr_my_view AS SELECT bucket FROM lr_mine;
-	INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width, origin,
+	INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, source_oid, ts_column, width, origin,
 	  group_by, agg_functions, agg_columns)
-	VALUES ('lr_my_view', 'lr_mine', 'lr_victim', 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');" 2>&1 >/dev/null)"
+	VALUES ('lr_my_view', 'lr_mine', 'lr_victim', 0, 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');" 2>&1 >/dev/null)"
 check "a role cannot tie a rollup row to a table it cannot read (42501, #1376)" \
 	"$(st="$(sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$lr_tie" | head -1)"; echo "${st:-${lr_tie:+other}}")|$(sqlstate "DROP TABLE lr_victim")" "42501|ok"
 # The partials table goes with the view by an AUTO dependency, and a drop deletes AUTO
@@ -609,8 +609,8 @@ as_stranger() {	# as_stranger SQL -> ok, the SQLSTATE it fails with, or other
 psql_run "CREATE TABLE lr_others (bucket timestamptz) USING pgcolumnar; GRANT SELECT ON lr_others TO lr_stranger;
           CREATE TABLE lr_src2 (ts timestamptz, v int) USING pgcolumnar; GRANT SELECT ON lr_src2 TO lr_stranger;"
 lr_row() {	# lr_row VIEW PARTIALS -> a rollup row over lr_src2
-	echo "INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, ts_column, width, origin,
-	  group_by, agg_functions, agg_columns) VALUES ('$1', '$2', 'lr_src2', 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');"
+	echo "INSERT INTO pgcolumnar.rollup (rollup, partials, source, source_storage, source_oid, ts_column, width, origin,
+	  group_by, agg_functions, agg_columns) VALUES ('$1', '$2', 'lr_src2', 0, 0, 'ts', '1 hour', '$ORIGIN', '{}', '{count}', '{*}');"
 }
 check "a role cannot name another role's table as its rollup's partials (42501), and that table survives its view's drop (#1376)" \
 	"$(as_stranger "CREATE TABLE lr_p2 (bucket timestamptz) USING pgcolumnar; CREATE VIEW lr_v2 AS SELECT bucket FROM lr_p2; $(lr_row lr_v2 lr_others)")|$(as_stranger "SET client_min_messages = warning; DROP VIEW IF EXISTS lr_v2")|$(q "SELECT count(*) FROM pg_class WHERE relname = 'lr_others'")" \
