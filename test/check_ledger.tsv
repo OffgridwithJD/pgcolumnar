@@ -1790,6 +1790,12 @@ harness_selftest	630-a-build-with-no-pg-config-must	and the refusal is make's ow
 harness_selftest	630-a-build-with-no-pg-config-must	and with stdin closed it refuses, rather than exiting 0 having done nothing	15;16;17;18;19	2026-10-13	sed given </dev/null but no refusal: make goes on with an empty PGXS and exits 0;the Makefile before #1344: an empty PGXS hands the CC probe's sed no file, so it reads stdin;the refusal fires but does not name PG_CONFIG
 harness_selftest	630-a-build-with-no-pg-config-must	premise: a reader of this stdin waits rather than reaching EOF	15;16;17;18;19	never	-
 harness_selftest	630-a-build-with-no-pg-config-must	premise: the selftest knows where the Makefile it drives is	15;16;17;18;19	never	-
+harness_selftest	640-every-suite-job-installs-the-extensions	every job that runs the suites installs every extension package (#1382)	15;16;17;18;19	2026-10-14	nightly.yml's coverage job without postgresql-18-partman, -hll and -tdigest (main before #1382's fix)
+harness_selftest	640-every-suite-job-installs-the-extensions	premise: both workflows are present	15;16;17;18;19	never	-
+harness_selftest	640-every-suite-job-installs-the-extensions	the detector names a suite job that lacks a package the others install	15;16;17;18;19	2026-10-14	640's _ej_missing never reports a missing package;640's job parser matches no job key
+harness_selftest	640-every-suite-job-installs-the-extensions	the detector names a workflow in which it finds no suite job	15;16;17;18;19	2026-10-14	640's _ej_missing without its no-suite-job guard
+harness_selftest	640-every-suite-job-installs-the-extensions	the detector names a workflow it cannot read	15;16;17;18;19	2026-10-14	640's _ej_missing without its unreadable-file guard
+harness_selftest	640-every-suite-job-installs-the-extensions	the suite-running jobs are exactly the five this part knows	15;16;17;18;19	2026-10-14	640's job scan no longer counts a cluster job that runs pytest
 import_export_privilege	import_export_privilege	export_arrow refuses SELECT of a table the caller cannot read	15;16;17;18;19	never	-
 import_export_privilege	import_export_privilege	export_parquet refuses SELECT of a table the caller cannot read	15;16;17;18;19	never	-
 import_export_privilege	import_export_privilege	get_storage_id refuses a caller who cannot SELECT the relation	15;16;17;18;19	never	-
