@@ -369,8 +369,15 @@ call_for() {  # call_for <fn> -> a valid argument vector for that function
 #
 # Granting EXECUTE puts the role PAST the SQL layer on purpose, so the only thing
 # left that can refuse it is the C check. Now 42501 attributes to one layer.
+#
+# On every overload, by OID (#1387 review): a grant on a hard-coded signature, with
+# its error discarded, left the role without EXECUTE when a declaration changed, and
+# the premise below then reddened for the fixture's reason rather than the product's.
 for fn in $GUARDED_BEHAVIOURAL; do
-	psql_run "GRANT EXECUTE ON FUNCTION pgcolumnar.$fn($(case "$fn" in read_projection|reconstruct_via_projection) echo "regclass,text" ;; *) echo "regclass,int" ;; esac)) TO t_ep;" 2>/dev/null
+	while IFS= read -r sig; do
+		[ -n "$sig" ] && psql_run "GRANT EXECUTE ON FUNCTION $sig TO t_ep;"
+	done <<<"$(q "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+	              WHERE n.nspname = 'pgcolumnar' AND p.proname = '$fn';")"
 done
 check "premise: t_ep now holds EXECUTE, so a refusal below can only be the C check" \
 	"$(q "SELECT bool_and(has_function_privilege('t_ep', p.oid, 'EXECUTE'))
@@ -380,8 +387,12 @@ check "premise: t_ep now holds EXECUTE, so a refusal below can only be the C che
 
 for fn in $GUARDED_BEHAVIOURAL; do
 	sql="$(call_for "$fn")"
-	check "premise: the owner can call $fn, so a refusal below is a refusal" \
-		"$(q "$sql" >/dev/null 2>&1 && echo ok || echo broken)" "ok"
+	# A check, not a premise (#1236; #1387 review): a function refusing even its owner
+	# is a product change. Read by psql's exit status: q ends in "|| true", so
+	# "q ... && echo ok" printed ok whatever the call did.
+	check "the owner can call $fn, so a refusal below is a refusal" \
+		"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+			-X -At -v ON_ERROR_STOP=1 -c "$sql" >/dev/null 2>&1 && echo ok || echo broken)" "ok"
 	check "$fn refuses an unprivileged caller with 42501" \
 		"$(as_ep "$sql")" "42501"
 done
@@ -405,7 +416,7 @@ check "premise: t_ep holds the server-file roles, so it reaches the table check"
 # at which point they reddened and named themselves, which is what a pin is for.
 for fn in export_arrow export_parquet import_arrow import_parquet; do
 	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_ep -d "$PGC_DB" -At \
-		-c "SELECT pgcolumnar.$fn('ep_target','/nonexistent/dir/x');" 2>&1 | head -1)"
+		-c "SELECT pgcolumnar.$fn('ep_target','/nonexistent/dir/x');" 2>&1 | grep -m1 'ERROR:')"
 	case "$out" in
 		*"permission denied for table"*) state=refused ;;
 		*"could not open file"*)         state=reached-the-file-layer ;;

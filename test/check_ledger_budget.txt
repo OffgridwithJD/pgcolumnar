@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 241
+suites_not_covered 240
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2061,4 +2061,32 @@ suites_not_covered 241
 #     never         1965 - 3 = 1962
 #     dated          588 + 3 = 591
 #     1962 + 591 == 2553
-checks_never_observed_red 1962
+#
+# #1341, entry_point_privilege seeded with its pytest twin (OffgridwithJD): 1962 -> 1988,
+# and suites_not_covered 241 -> 240. The suite had no rows. It enters with all 31
+# checks from five-major runs (31/31 on each of 15-19). Five are dated, one per
+# mutation: get_storage_id and read_projection without their SELECT check (each
+# 42501 arm), export_parquet without its SELECT and import_arrow without its INSERT
+# check (each reached the file layer), and the install script gaining a function no
+# bucket names (the unbucketed arm). The other 26 arrive never. A relation-taking
+# function added with no check at all survives this suite, in both twins: it is
+# counted as claimed-guarded. Filed as #1386 rather than claimed here.
+#
+#     ledger rows   2553 + 31 = 2584
+#     never         1962 + 26 = 1988
+#     dated          591 +  5 = 596
+#     1988 + 596 == 2584
+#
+# #1387 review (OffgridwithJD): 1988 -> 1986. The five owner-call checks lose the premise
+# prefix: a function refusing even its owner is a product change, and the shell now
+# reads the call by psql's exit status ("q ... && echo ok" always printed ok). The
+# reconstruct one is dated by reconstruct_via_projection refusing a superuser, and
+# vm_is_visible's 42501 arm by its owner check removed. The shell grants EXECUTE by OID
+# on every overload, so the EXECUTE premise depends on the fixture alone and stays one.
+# Five-major runs: 31/31 on 15-19.
+#
+#     ledger rows   2584     = 2584
+#     never         1988 - 2 = 1986
+#     dated          596 + 2 = 598
+#     1986 + 598 == 2584
+checks_never_observed_red 1986

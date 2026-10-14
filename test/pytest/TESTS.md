@@ -154,6 +154,7 @@ behaviour, the source of that number is named.
 - [106. test_every_suite_job_installs_the_extensions.py: every job that runs the suites installs the extension packages](#106-test_every_suite_job_installs_the_extensionspy-every-job-that-runs-the-suites-installs-the-extension-packages)
 - [107. test_fdw_plan_privilege.py: planning a foreign table reads no server file for a role the scan would refuse](#107-test_fdw_plan_privilegepy-planning-a-foreign-table-reads-no-server-file-for-a-role-the-scan-would-refuse)
 - [108. test_arrow_import.py: import_arrow round trips, reads a foreign file, and refuses what it cannot decode](#108-test_arrow_importpy-import_arrow-round-trips-reads-a-foreign-file-and-refuses-what-it-cannot-decode)
+- [109. test_entry_point_privilege.py: every relation-taking entry point has a decided privilege bar](#109-test_entry_point_privilegepy-every-relation-taking-entry-point-has-a-decided-privilege-bar)
 
 ## 1. How to read a test in here
 
@@ -6876,3 +6877,13 @@ The pytest twin of `test/arrow_import.sh` (ported for #1341), every check by the
 | `test_the_refusals_and_every_temporal_carrier` | the dictionary and compressed refusals, every carrier and unit, the 22008 guards, the 42804 type matches with their controls, an empty target after a refusal, and nested units |
 | `test_an_import_maintains_the_tables_indexes` | the plan really uses the index, index and sequential scans agree, the unique violation and its row count, and the partial index |
 | `test_a_fifo_is_refused_not_a_hang` | XX001 within the wall clock, and the backend still up |
+
+## 109. test_entry_point_privilege.py: every relation-taking entry point has a decided privilege bar
+
+The pytest twin of `test/entry_point_privilege.sh` (#569, ported for #1341), every check by the shell's name. The population comes from the catalog, never the script: `prosrc` is the C symbol and `proargtypes[0] = regclass` is "takes a relation", and the install script's symbols are checked against the catalog as a set. Every entry point lands in exactly one bucket (exempt, relation-taking, relation by other means), the exempt list may not hold a relation-taking name, and the relation-taking class splits into catalog-governed (the six from #560) and claimed-guarded with none pinned as ungated. Then behaviourally: a login role holding EXECUTE, so the C check is the only refuser, is refused 42501 by the five guarded names after the owner's identical call succeeds, and the four file siblings refuse it at the table before touching the file.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_every_relation_taking_entry_point_has_a_decided_bar` | the enumeration premises, the symbol-set agreement, the bucket and class counts, the five 42501 refusals with their owner premises, and the four file siblings refused at the table |

@@ -651,4 +651,6 @@ guard_tests 433
 # six tests, by collection over the cluster files on this tree.
 # cluster_tests 549 -> 550 for #1341's test_a_half_declaration_is_no_retention in
 # test_ttl_expire.py, by collection over the cluster files on this tree.
-cluster_tests 550
+# cluster_tests 550 -> 551 for #1341's test_entry_point_privilege.py, the twin of
+# entry_point_privilege.sh: one test, by collection over the cluster files on this tree.
+cluster_tests 551
