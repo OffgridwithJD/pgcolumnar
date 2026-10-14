@@ -96,6 +96,9 @@ check "premise: the role can open a session" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U allow_nobody -d "$PGC_DB" -qtA -c 'SELECT 1' 2>&1)" "1"
 check "a non-superuser cannot widen the list (42501)" \
 	"$(sqlstate_of "SET pgcolumnar.objstore_allowed_endpoints = '10.0.0.1'" allow_nobody)" "42501"
+# WITH THE CONFIGURED LIST EMPTY (#1341). It was still "other.example, 127.0.0.1" here,
+# so the read worked whatever the session SET did, and the arm could not fail.
+set_list ""
 check_num "a superuser session SET works (admin override)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA \
 		-c "SET pgcolumnar.objstore_allowed_endpoints = '127.0.0.1'" -c "$Q" 2>/dev/null | tail -1)" "1000"
