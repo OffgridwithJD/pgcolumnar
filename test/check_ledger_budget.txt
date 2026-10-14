@@ -1858,4 +1858,17 @@ suites_not_covered 246
 #     never         1798     = 1798
 #     dated          551 + 4 =  555
 #     1798 + 555 == 2353
-checks_never_observed_red 1798
+#
+# #1339 audit, partition_lifecycle (OffgridwithJD): 1798 -> 1797. One new arm, a
+# drop plan refusing a LIST and a two-column RANGE parent, dated by the RANGE check
+# reduced to NOT FOUND (main's suite survives that). "premise: the parent now has the
+# partitions it reported" is an arm and loses the prefix (#1236), dated with eight
+# neighbours by a create_ahead that leaves its last partition unattached. The
+# 63-character arm is renamed 63-byte, as its fixtures are; both renames keep their
+# rows' history. Five-major runs: partition_lifecycle 60/60 on 15-19.
+#
+#     ledger rows   2353 + 1 = 2354
+#     never         1798 - 1 = 1797
+#     dated          555 + 2 =  557
+#     1797 + 557 == 2354
+checks_never_observed_red 1797
