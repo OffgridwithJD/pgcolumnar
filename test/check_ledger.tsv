@@ -1887,6 +1887,14 @@ native_chunk_length_bound	native_chunk_length_bound	backend survived the sequent
 native_chunk_length_bound	native_chunk_length_bound	backend survived the truncated-length fetch	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	premise: a point lookup uses the index, not a sequential columnar scan	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	premise: that fetch returns the row	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	a DELETE whose qual deletes another row of the table succeeds and leaves heap's rows (#1394)	15;16;17;18;19	2026-10-14	PgColumnarUpsertDeleteVector without the command advance (main before #1394's fix)
+native_delete_visibility_paths	native_delete_visibility_paths	a deleted row is invisible via the index	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	a live row is visible via the index	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	a row deleted in-transaction is invisible in the same transaction	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	aggregate over the whole table sees the live set	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	index / bitmap scan sees the live set	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	index-only scan sees the live set	15;16;17;18;19	never	-
+native_delete_visibility_paths	native_delete_visibility_paths	sequential scan sees the live set (row-emitting path)	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	a wide index fetch does not pin once per column	15;16;17;18;19	2026-10-13	the coalesced fetch merging no adjacent ranges, so each column is read on its own
 native_fetch_coalesce	native_fetch_coalesce	premise: a point lookup uses the index	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	premise: fetching every projected column touched a measurable number of buffers	15;16;17;18;19	never	-
