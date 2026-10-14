@@ -1854,6 +1854,7 @@ PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 	int			deletedCount = rm->deletedCount;
 	ItemPointerData replaceTid;
 	bool		haveReplace = false;
+	bool		writtenThisCommand = false;
 
 	delete_vector_lock_chunk_group(storageId, rm->groupNumber, 0);
 
@@ -1945,6 +1946,17 @@ PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 
 		replaceTid = existing->t_self;
 		haveReplace = true;
+
+		/*
+		 * TWO WRITES OF ONE GROUP IN ONE COMMAND (#1394). A statement that starts a
+		 * scan inside another -- a DELETE in a function the outer DELETE's qual calls
+		 * -- writes the outer marks at its scan start and its own at its end, in the
+		 * same command. heap_update refuses a version written by the current command
+		 * ("attempted to update invisible tuple"), so advance the command first.
+		 */
+		writtenThisCommand =
+			TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(existing->t_data)) &&
+			HeapTupleHeaderGetCmin(existing->t_data) >= GetCurrentCommandId(false);
 	}
 	systable_endscan(scan);
 
@@ -1962,6 +1974,8 @@ PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 
 	if (haveReplace)
 	{
+		if (writtenThisCommand)
+			CommandCounterIncrement();
 		tuple->t_self = replaceTid;
 		CatalogTupleUpdate(rel, &replaceTid, tuple);
 	}

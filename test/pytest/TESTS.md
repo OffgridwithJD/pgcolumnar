@@ -5250,6 +5250,7 @@ its row in place, so the in-transaction arm cannot be satisfied by a delete that
 | test | what it holds |
 | --- | --- |
 | `test_native_delete_visibility_paths` | every arm: the row count and group span, then the live set through a Seq Scan, an Index Scan, an Index Only Scan and the columnar aggregate — each with its plan asserted — then one deleted and one live row through the index, and a delete read back inside its own transaction |
+| `test_a_delete_whose_qual_deletes_another_row_matches_heap` | a DELETE whose qual calls a function that deletes the next row of the same table succeeds and leaves heap's rows (#1394). Its inner DELETE writes the outer marks at scan start and its own at statement end, in one command, and the second write failed with "attempted to update invisible tuple" |
 
 ## 66. test_temporal.py: a columnar table enforces temporal constraints like a heap
 

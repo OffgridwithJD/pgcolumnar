@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 243
+suites_not_covered 242
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -1979,4 +1979,16 @@ suites_not_covered 243
 #     never         1895 + 23 = 1918
 #     dated          577 +  2 = 579
 #     1918 + 579 == 2497
-checks_never_observed_red 1918
+#
+# #1394, a DELETE whose qual deletes another row of the same table (jdatcmd): 1918 ->
+# 1925, and suites_not_covered 243 -> 242. native_delete_visibility_paths had no rows;
+# it enters with all eight checks from five-major runs (8/8 on each of 15-19). The new
+# arm is dated by main's upsert, which failed with "attempted to update invisible
+# tuple" (55000). The other seven arrive never: seeding a suite moves the census up by
+# its undated rows.
+#
+#     ledger rows   2497 + 8 = 2505
+#     never         1918 + 7 = 1925
+#     dated          579 + 1 =  580
+#     1925 + 580 == 2505
+checks_never_observed_red 1925

@@ -642,4 +642,6 @@ guard_tests 433
 # cluster_tests 539 -> 541 for #1298's test_a_catalog_reading_takes_in_none_of_another_sessions_reads
 # in test_catalog_delete_index.py and test_a_storage_reading_takes_in_none_of_another_sessions_reads
 # in test_catalog_plan_index.py, by collection over the cluster files on this tree.
-cluster_tests 541
+# cluster_tests 541 -> 542 for #1394's test_a_delete_whose_qual_deletes_another_row_matches_heap
+# in test_native_delete_visibility_paths.py, by collection over the cluster files on this tree.
+cluster_tests 542

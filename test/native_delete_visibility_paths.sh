@@ -58,4 +58,27 @@ check "a live row is visible via the index" \
 check "a row deleted in-transaction is invisible in the same transaction" \
 	"$(q 'BEGIN; DELETE FROM t WHERE id = 8; SELECT count(*) FROM t WHERE id = 8; ROLLBACK;' | grep -E '^[0-9]+$' | head -1)" "0"
 
+# A DELETE whose qual deletes another row of the same table (#1394). The inner DELETE's
+# scan start writes the outer statement's buffered marks, and its statement end writes
+# its own mark to the same row group, both in one command. The second write updated a
+# delete_vector row the first had written in that command, and failed with "attempted
+# to update invisible tuple". Run on heap too; the columnar answer must be heap's.
+psql_run "CREATE FUNCTION del_next(i int, t text) RETURNS int LANGUAGE plpgsql AS \$\$
+BEGIN EXECUTE format('DELETE FROM %s WHERE id = %s', t, i + 1); RETURN 1; END \$\$;"
+for am in pgcolumnar heap; do
+	psql_run "CREATE TABLE dn_$am (id int, v int) USING $am;
+	          INSERT INTO dn_$am SELECT g, 0 FROM generate_series(1, 20) g;"
+done
+dn() {	# dn AM -> ok, or the SQLSTATE the DELETE fails with
+	local out
+	out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
+		-c "DELETE FROM dn_$1 WHERE id % 2 = 0 AND del_next(id, 'dn_$1') IS NOT NULL" 2>&1 >/dev/null)
+	[ -z "$out" ] && { echo ok; return; }
+	echo "$out" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+dn_after() { q "SELECT count(*) || '|' || coalesce(sum(id), 0) FROM dn_$1"; }
+check "a DELETE whose qual deletes another row of the table succeeds and leaves heap's rows (#1394)" \
+	"$(dn pgcolumnar)|$(dn_after pgcolumnar)" "$(dn heap)|$(dn_after heap)"
+
 pgc_summary
