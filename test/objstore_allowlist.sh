@@ -69,8 +69,12 @@ URL="http://127.0.0.1:$HTTP_PORT/fixture.parquet"
 Q="SELECT count(*) FROM pgcolumnar.read_parquet('$URL') AS (a int8)"
 
 # ---- the default: deny everything remote ------------------------------------
-check "premise: the list defaults to empty" \
-	"$(q "SELECT current_setting('pgcolumnar.objstore_allowed_endpoints')")" ""
+# A check, not a premise (#1236; #1379 review): the default is the product's. And
+# "empty" is produced by the query itself, so a capture that is empty because the
+# query never ran cannot pass.
+check "the list defaults to empty" \
+	"$(q "SELECT CASE WHEN current_setting('pgcolumnar.objstore_allowed_endpoints') = '' THEN 'empty'
+	          ELSE 'set: [' || current_setting('pgcolumnar.objstore_allowed_endpoints') || ']' END")" "empty"
 check "default: an http read is refused 42501" "$(sqlstate_of "$Q")" "42501"
 check "default: the refusal names the GUC" \
 	"$([ "$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA \

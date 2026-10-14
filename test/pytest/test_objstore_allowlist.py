@@ -109,7 +109,7 @@ def test_the_endpoint_allow_list(pgc_cluster, pgc_conn, server_dir, expect):
         # ---- the default: deny everything remote ----------------------------
         setting = _state(pgc_cluster, "SELECT current_setting('pgcolumnar.objstore_allowed_endpoints')")[2]
         expect.text("empty" if setting == "" else f"set: [{setting}]", "empty",
-                    "premise: the list defaults to empty")
+                    "the list defaults to empty")
         state, msg, _ = _state(pgc_cluster, q)
         expect.text(state, "42501", "default: an http read is refused 42501")
         expect.text("yes" if "objstore_allowed_endpoints" in msg else "no", "yes",
