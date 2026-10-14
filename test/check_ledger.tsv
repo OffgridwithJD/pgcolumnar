@@ -2220,6 +2220,34 @@ projection_parallel	projection_parallel	premise: the table holds every inserted 
 projection_parallel	projection_parallel	the parallel count is a parallel covering projection scan	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	the workers' rows add up to the covering rows, each returned once	15;16;17;18;19	2026-10-13	a parallel worker never wires the shared row-group counter, so every worker scans every group
 projection_parallel	projection_parallel	workers share the covering projection scan, it is not a single claimer	15;16;17;18;19	2026-10-13	first-wins-claimer;only the first parallel worker claims row groups, so one worker scans the whole table (#1336)
+projection_privilege	projection_privilege	a caller with no SELECT is told a privilege is missing, not that RLS is in force	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	a role WITH SELECT still reads the projection	15;16;17;18;19	2026-10-14	read_projection stores no rows: its tuplestore_putvalues call removed, so every caller gets zero rows
+projection_privilege	projection_privilege	a role with EXECUTE but no SELECT is refused read_projection	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	a role with only schema USAGE is refused read_projection	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	and THAT refusal is the C check, which raises 42501 from aclcheck_error	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	and is refused reconstruct_via_projection	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	and is refused reconstruct_via_projection, which leaks non-covered columns	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	and read_projection does NOT, so the two differ as the issue says	15;16;17;18;19	2026-10-14	read_projection bound to the reconstruct_via_projection C symbol in the extension SQL, so it returns the non-covered columns too;read_projection stores no rows: its tuplestore_putvalues call removed, so every caller gets zero rows
+projection_privilege	projection_privilege	and so does reconstruct_via_projection	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	and still reconstructs	15;16;17;18;19	2026-10-14	reconstruct_via_projection stores no rows: its tuplestore_putvalues call removed, so every caller gets zero rows
+projection_privilege	projection_privilege	and the refusal says the feature is not supported, not that a privilege is missing	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	premise: t_prjexec can open a session, so a refusal below is a refusal	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	premise: t_prjexec really does hold EXECUTE, so it reaches the C gate	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	premise: t_prjsel CAN read the table, so its arm below tests the bar	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	premise: the test roles are not superusers	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	premise: the unprivileged role cannot read the table by any ordinary route	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	read_projection now refuses a policy-restricted caller (#563)	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	reconstruct really does return the NON-COVERED column	15;16;17;18;19	2026-10-14	reconstruct_via_projection renders every column the projection does not cover as NULL instead of the base value;reconstruct_via_projection stores no rows: its tuplestore_putvalues call removed, so every caller gets zero rows
+projection_privilege	projection_privilege	reconstruct: a caller with no SELECT is told a privilege is missing, not that RLS is in force	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	reconstruct: the EXECUTE role reaches the projection lookup on the same call	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	reconstruct: the base ACL is checked before the projection name is looked up	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	reconstruct: the no-EXECUTE role never reaches the body, so the grant is what stopped it	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	the base ACL is checked before the projection name is looked up	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	the no-EXECUTE role never reaches the body, so the grant is what stopped it	15;16;17;18;19	never	-
+projection_privilege	projection_privilege	the owner reads the projection, and gets rows	15;16;17;18;19	2026-10-14	read_projection stores no rows: its tuplestore_putvalues call removed, so every caller gets zero rows
+projection_privilege	projection_privilege	the owner reconstructs, and gets rows	15;16;17;18;19	2026-10-14	reconstruct_via_projection stores no rows: its tuplestore_putvalues call removed, so every caller gets zero rows
+projection_privilege	projection_privilege	the policy is in force for ordinary SQL	15;16;17;18;19	2026-10-14	the columnar custom scan drops its restriction quals (plan qual set to NIL), so the row-level-security policy qual is not applied
+projection_privilege	projection_privilege	while the EXECUTE role reaches the projection lookup on the same call	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	a clause that mentions the sort key but cannot prune on it does not cheapen a covering projection	15;16;17;18;19	2026-10-12	a covering projection is discounted for any clause that mentions the sort key, as before #1126
 projection_scan_cost	projection_scan_cost	a non-sort-key restriction does not cheapen a covering projection	15;16;17;18;19	2026-09-18	-
 projection_scan_cost	projection_scan_cost	a tight covering projection is cheaper relative to the base than a loose one	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount

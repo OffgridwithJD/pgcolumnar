@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 238
+suites_not_covered 237
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2114,4 +2114,27 @@ suites_not_covered 238
 #     never         1986 + 35 + 9 - 10 = 2020
 #     dated          598 + 10           =  608
 #     2020 + 608 == 2628
-checks_never_observed_red 2020
+#
+# #1339, five projection_privilege checks were premises about product code
+# (jdatcmd): 2020 -> 2041, and suites_not_covered 238 -> 237. Rule #1236: a
+# `premise:` check must be one no repository change can turn red. These five test
+# what read_projection, reconstruct_via_projection and the columnar scan return, so
+# a product change can redden them. They drop the prefix in both twins, with the
+# rest of each name unchanged (#1356 had already renamed the owner-read arm). The
+# suite had no rows. It enters with all 28 checks from five-major runs (28/28 on
+# each of 15-19). Seven are dated on PG18 by four
+# mutations of the extension and one of its SQL file:
+#   - read_projection stores no rows: the owner arm, the "does NOT" arm and the
+#     SELECT-holder's read arm go red;
+#   - reconstruct_via_projection stores no rows: the owner arm, the NON-COVERED arm
+#     and "and still reconstructs" go red;
+#   - reconstruct renders every non-covered column as NULL: the NON-COVERED arm;
+#   - read_projection bound to the reconstruct C symbol: the "does NOT" arm;
+#   - the columnar custom scan drops its quals: "the policy is in force".
+# The other 21 arrive never.
+#
+#     ledger rows   2628 + 28 = 2656
+#     never         2020 + 21 = 2041
+#     dated          608 +  7 =  615
+#     2041 + 615 == 2656
+checks_never_observed_red 2041
