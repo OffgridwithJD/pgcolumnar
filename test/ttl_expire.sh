@@ -266,30 +266,34 @@ check "control: and the rows are all still there" \
 #
 # Each refused table holds 3,000 rows ten days old, every one past a one-day
 # retention, so a missing refusal is not a quiet no-op: it is retired groups. The
-# row count beside each SQLSTATE is what says nothing was dropped.
+# row count beside each SQLSTATE is what says nothing was dropped. ttl_ctl is the
+# same fixture as ttl_own on its own table, so the owner's control cannot be
+# reached by whatever a missing refusal did to ttl_own.
 psql_run "CREATE ROLE ttl_nobody;
           GRANT USAGE ON SCHEMA pgcolumnar TO ttl_nobody;"
-for _t in ttl_own ttl_int ttl_gone; do
+for _t in ttl_own ttl_ctl ttl_int ttl_gone; do
 	_ty=timestamptz; [ "$_t" = ttl_int ] && _ty=int
 	psql_run "CREATE TABLE $_t (id int, ts $_ty, ts2 timestamptz) USING pgcolumnar;
 	          SELECT pgcolumnar.set_options('$_t', stripe_row_limit => 1000);"
 done
 psql_run "INSERT INTO ttl_own SELECT g, now() - interval '10 days', now() FROM generate_series(1,3000) g;
+          INSERT INTO ttl_ctl SELECT g, now() - interval '10 days', now() FROM generate_series(1,3000) g;
           INSERT INTO ttl_int SELECT g, g - 1500, now() FROM generate_series(1,3000) g;
           INSERT INTO ttl_gone SELECT g, now() - interval '10 days', now() - interval '10 days' FROM generate_series(1,3000) g;"
 _lay=""
-for _t in ttl_gone ttl_int ttl_own; do
+for _t in ttl_ctl ttl_gone ttl_int ttl_own; do
 	_lay="$_lay$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('$_t');"):$(q "SELECT count(*) FROM $_t;") "
 done
-check "premise: each refused table holds 3000 rows in three row groups" "$_lay" "3:3000 3:3000 3:3000 "
+check "premise: each table holds 3000 rows in three row groups" "$_lay" "3:3000 3:3000 3:3000 3:3000 "
 
 # Ownership: DELETE on the table is not enough, expire drops whole row groups.
 psql_run "SELECT pgcolumnar.set_options('ttl_own', ttl_column => 'ts', ttl_interval => '1 day');
+          SELECT pgcolumnar.set_options('ttl_ctl', ttl_column => 'ts', ttl_interval => '1 day');
           GRANT SELECT, DELETE ON ttl_own TO ttl_nobody;"
 check "a role that does not own the table cannot expire it, even holding DELETE (42501)" \
 	"$(ttl_state "SET ROLE ttl_nobody; SELECT pgcolumnar.expire('ttl_own');")|$(q 'SELECT count(*) FROM ttl_own')" "42501|3000"
 check "control: and its owner's expire retires every aged group" \
-	"$(q "SELECT pgcolumnar.expire('ttl_own');")|$(q 'SELECT count(*) FROM ttl_own')" "3|0"
+	"$(q "SELECT pgcolumnar.expire('ttl_ctl');")|$(q 'SELECT count(*) FROM ttl_ctl')" "3|0"
 
 # Type: set_options takes a column of any type, and expire is what refuses one
 # that is not date, timestamp or timestamptz.
