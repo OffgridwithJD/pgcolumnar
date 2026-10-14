@@ -1818,4 +1818,18 @@ suites_not_covered 246
 #     never         1801 + 2 - 2 - 3 = 1798
 #     dated          539 + 1 + 2 + 3 =  545
 #     1798 + 545 == 2343
-checks_never_observed_red 1798
+#
+# #1339 audit, ttl_expire's twins (OffgridwithJD): 1798 -> 1796. Two arms gain their
+# first red date. The no-retention arm now requires SQLSTATE 55000, as its pytest twin
+# does (it accepted any ERROR); it is red with the refusal raised as XX000. And
+# "compact_rewrite retired a group" tests product code, so it loses the `premise:`
+# prefix (#1236), its row renamed with its history, and is red with compact_rewrite
+# returning 0. The pytest date arm now reads expire's own return, as the shell twin
+# does; that is a pytest change and moves no row. Five-major runs on the tree merged
+# with #1353: 70/70 on 15-19.
+#
+#     ledger rows   2343     = 2343
+#     never         1798 - 2 = 1796
+#     dated          545 + 2 =  547
+#     1796 + 547 == 2343
+checks_never_observed_red 1796
