@@ -212,19 +212,30 @@ check "a duplicate key is still rejected" \
 # so it is fixed at server start. Neither was set or read by any test.
 psql_run "CREATE TABLE rl (id int, v int) USING pgcolumnar;"
 psql_run "INSERT INTO rl SELECT g, g FROM generate_series(1, 100) g;"
-# row_locks_while_updating SETTING -> class-104 locks another session holds mid-UPDATE
+# row_locks_while_updating SETTING -> "<class-104 locks>|<holder's UPDATE running>", read
+# in one query once the holder's UPDATE is running. WAITED FOR, NOT SLEPT ON (#1368
+# review): read after a fixed sleep, a holder that had not reached its UPDATE yet made
+# the off arm read 0 on a build that ignores the setting, because nothing was locked.
+# The second field proves the UPDATE was running when the first was read.
 row_locks_while_updating() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
 		-c "BEGIN; SET LOCAL pgcolumnar.enable_row_update_lock = $1; UPDATE rl SET v = v + 1 WHERE id = 7; SELECT pg_sleep(3); COMMIT;" \
 		>/dev/null 2>&1 &
-	local holder=$!
-	sleep 1
-	q "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 104 AND pid <> pg_backend_pid()"
+	local holder=$! got="" i
+	for i in $(seq 1 100); do
+		got="$(q "SELECT count(*) FILTER (WHERE locktype = 'advisory' AND objsubid = 104) || '|' ||
+		                 count(*) FILTER (WHERE locktype = 'relation' AND relation = 'rl'::regclass AND mode = 'RowExclusiveLock')
+		            FROM pg_locks WHERE pid <> pg_backend_pid()")"
+		[ "${got#*|}" = 1 ] && break
+		sleep 0.1
+	done
+	echo "$got"
 	wait "$holder"
 }
+_rl_on="$(row_locks_while_updating on)"
 check "an UPDATE holds a row-identity lock (class 104) while enable_row_update_lock is on" \
-	"$([ "$(row_locks_while_updating on)" -ge 1 ] && echo held || echo none)" "held"
-check "and holds none with enable_row_update_lock off" "$(row_locks_while_updating off)" "0"
+	"$([ "${_rl_on%|*}" -ge 1 ] 2>/dev/null && echo "held|${_rl_on#*|}" || echo "none|${_rl_on#*|}")" "held|1"
+check "and holds none with enable_row_update_lock off" "$(row_locks_while_updating off)" "0|1"
 check "row_lock_buckets is fixed at server start, so a session cannot change it (55P02)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -v VERBOSITY=sqlstate -c "SET pgcolumnar.row_lock_buckets = 7;" 2>&1 | sed -n 's/^.*ERROR:[[:space:]]*\([0-9A-Z]\{5\}\).*$/\1/p')|$(q "SELECT context || '|' || setting FROM pg_settings WHERE name = 'pgcolumnar.row_lock_buckets'")" \
 	"55P02|postmaster|1024"
