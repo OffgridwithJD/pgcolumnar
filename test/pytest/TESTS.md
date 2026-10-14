@@ -6298,6 +6298,8 @@ ON A PRIVATE DATABASE for this test too, and for a reason the other two share: `
 
 Measured on the unfixed tree in this harness's own database, 6 pages: 6 blocks for the newest relation with `seq_scan = 1`, against 2 for the oldest. With the fix, 3 and 3.
 
+COUNTED IN THE PLAN'S OWN TRANSACTION (#1298). The block counts and the `storage` scan counts come from `pg_stat_get_xact_blocks_fetched` and `pg_stat_get_xact_numscans`, read before and after the plans in one transaction, not from the shared `pg_statio_all_tables`, which takes in other sessions' reads. Section 81 has the measurement.
+
 ### Every test
 
 | test | what it holds |
@@ -6307,6 +6309,7 @@ Measured on the unfixed tree in this harness's own database, 6 pages: 6 blocks f
 | `test_planning_still_probes_a_populated_catalog` | that `projection` is larger than the threshold so the two paths differ, that the measured table owns a small share of it, that reading it whole costs something, and that planning costs less than reading it whole |
 | `test_the_written_limit_lookup_does_not_sweep_the_storage_catalog` | that the newest relation's storage row is far enough into the catalog to tell the two routes apart, that the two relations are far enough apart, that both plans reached `pgcolumnar.storage`, that planning over the newest did **not** sequentially scan it, and that the newest costs no more catalog work than the oldest |
 | `test_the_written_limit_does_not_depend_on_heap_order` | that a covering projection gave the table a second storage row, that the two rows disagree about `row_group_limit`, that this query shape is priced differently under the two limits, that the no-op update moved the base row, that the base row was first before it and the projection's row after, and that the planned cost does **not** change |
+| `test_a_storage_reading_takes_in_none_of_another_sessions_reads` | that a statement which reads no catalog itself, inside which a second session scans `pgcolumnar.storage` and exits, reads zero blocks of it; and, as its control, that the second session's reads do reach the shared view (#1298) |
 
 ## 81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database
 
@@ -6314,7 +6317,7 @@ Port of `catalog_delete_index.sh`. `delete_group_rows()` opens its catalog from 
 
 THE FIX IS NOT "USE THE INDEX", so the test cannot be "was the index used". A probe is a btree descent plus a heap fetch plus two catcache lookups, which on a catalog of a few pages is MORE work than reading the whole thing and far less on a large one. Both sizes occur in one installation. So these arms measure at three catalog sizes and each carries only the claim its size can support.
 
-THEY ASSERT THE WORK AND NEVER THE ACCESS PATH: buffers out of `pg_statio_all_tables`, heap and index both. An earlier version asserted `seq_scan == 0` and `idx_scan >= 1` per catalog; run against the build that chooses by catalog size -- cheaper at every size measured -- it failed 13 of 21 arms, the same 13 a full revert reddens. A test that cannot tell a revert from an improvement fires on correct code, and a guard that fires on correct code gets switched off.
+THEY ASSERT THE WORK AND NEVER THE ACCESS PATH: buffers counted in the measured statement's own transaction, heap and index both (#1298). An earlier version asserted `seq_scan == 0` and `idx_scan >= 1` per catalog; run against the build that chooses by catalog size -- cheaper at every size measured -- it failed 13 of 21 arms, the same 13 a full revert reddens. A test that cannot tell a revert from an improvement fires on correct code, and a guard that fires on correct code gets switched off.
 
 NOT A CONSTANT ANYWHERE. Every buffer count is compared against another taken in the same run from the same build, because the numbers are not the same on every major: the same fixture reads 848 buffers on PG17, 845 on PG15 and 895 on PG19. `pgcolumnar.index_min_blocks` decides the path, so the same work is measured two or three ways and the readings are compared to each other.
 
@@ -6336,7 +6339,7 @@ THE PORT RUNS ON A PRIVATE DATABASE, not the private schema `pgc_conn` gives eve
 
 The two halves share no code and no fixture. The shell suite uses ten- and forty-group tables, retires every OTHER group and adds 200,000 rows of deep noise; this one uses twelve and forty-five, retires the LAST half, and adds 150,000. The shell suite sums the work in SQL; this one reads it per catalog and sums in Python, and prints the per-catalog breakdown for every setting -- which is how the drift was traced to `row_group` alone, the one catalog a compaction writes to.
 
-THE ONE THING THIS HALF HAS TO DO THAT THE SHELL HALF DOES NOT is flush the statistics before resetting them. This harness holds one connection for the whole file, so the writes leave pending statistics in the backend that `pg_stat_reset()` does not clear; they are flushed afterwards and land on top of the reading. Measured on an otherwise identical single-session fixture: `row_group idx=36 seq=15` without the flush, `idx=32 seq=0` with it. The fifteen were the test's own `DELETE`. The shell half runs every statement in a fresh backend, which flushes on exit, so it cannot reach this state.
+COUNTED IN THE STATEMENT'S OWN TRANSACTION, NOT FROM `pg_statio_all_tables` (#1298). That view is shared: another session's reads reach it whenever that session flushes or exits, and `pg_stat_force_next_flush()` flushes only the caller's own counts, so no reset or flush keeps them out. Measured on PG18 with a second session scanning the catalogs during one compaction: the shared reading rose by 28 to 120 buffers, the transaction's own reading by -3 to +18. `_cat_blocks` reads `pg_stat_get_xact_blocks_fetched` before and after the statements in one transaction, so pending counts left by the fixture's writes cancel out as well. The vacuum test still reads the shared view: VACUUM cannot run in a transaction block.
 
 `pg_stat_reset()` is database-wide. The corpus runs serially within a worker.
 
@@ -6347,6 +6350,7 @@ THE ONE THING THIS HALF HAS TO DO THAT THE SHELL HALF DOES NOT is flush the stat
 | `test_retiring_a_group_costs_no_more_for_a_bigger_database` | per phase: three identical targets, the emptied groups retired, every survivor kept, all six catalogs read, and two compactions at the same setting agreeing well inside the floor. Then that the default does less work than probing every catalog at six pages, less than reading every one whole at twenty-two and at seventy-six, and that its cost grows far less with the database than reading whole does |
 | `test_vacuum_reads_less_of_row_group_than_reading_it_whole` | that the vacuum walked this table's groups, that two vacuums at the same setting agree, and that its `row_group` work is below what reading that catalog whole costs -- the `PgColumnarComputeAllVisibleGroups` read, which the compaction path never reaches |
 | `test_dropping_a_table_reads_less_of_the_catalogs_than_reading_them_whole` | that a DROP costs less catalog work than reading the seven catalogs whole, and -- below the threshold -- less than forcing a probe. The subject is `delete_rows_by_storage_id`, one parameterised line serving seven catalogs on the DROP/TRUNCATE path, which nothing covered before (#1207). Measured in buffers, never the access path, and on a fixture sixty tables wide because `pgc_own_db` gives this file a private database where the shell twin shares a cluster |
+| `test_a_catalog_reading_takes_in_none_of_another_sessions_reads` | that a statement which reads no catalog itself, inside which a second session (run by `COPY ... TO PROGRAM`) scans `row_group` and `column_chunk` and exits, reads zero; and, as its control, that the second session's reads do reach the shared view (#1298) |
 
 ## 82. test_rewrite_storage_oid.py: a type rewrite keeps the storage row on the live table
 
