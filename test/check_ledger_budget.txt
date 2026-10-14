@@ -1914,4 +1914,18 @@ suites_not_covered 244
 #     never         1821 + 72 = 1893
 #     dated          564 +  3 =  567
 #     1893 + 567 == 2460
-checks_never_observed_red 1893
+#
+# #1298, the catalog work arms count in the measured statement's own transaction
+# (jdatcmd): 1893 -> 1895. catalog_delete_index and catalog_plan_index read
+# pg_stat_get_xact_blocks_fetched before and after the measured statement, in one
+# transaction, instead of the shared pg_statio_all_tables. Each suite gains two
+# checks, from five-major runs (36/36 and 29/29 on each of 15-19). The arm that a
+# second session's reads stay out of the reading is dated in each, by the suite
+# with its old shared-view helper (31 and 10 buffers taken in). The control that
+# the second session's reads do reach the shared view arrives never in each.
+#
+#     ledger rows   2460 + 4 = 2464
+#     never         1893 + 2 = 1895
+#     dated          567 + 2 =  569
+#     1895 + 569 == 2464
+checks_never_observed_red 1895

@@ -16,6 +16,8 @@ nothing else is counting during this test, and this file must not be run
 concurrently with another that reads statistics.
 """
 
+import time
+
 import psycopg
 
 ROWS = 1200
@@ -170,30 +172,18 @@ PLAN_CATS = ("options", "projection")
 
 
 def _plan_work(conn, n, min_blocks=None):
-    """Buffers `options` and `projection` serve while one query is planned `n` times.
+    """Buffers `options` and `projection` serve while one query is planned `n`
+    times, counted in the plans' own transaction (_xact_work, #1298).
 
     `n` plans rather than one, because the effect is per-plan: six buffers is too
     small a base to divide into, and fifty makes it three hundred against
     nothing.
     """
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_stat_force_next_flush()")
-        cur.execute("SELECT pg_stat_reset()")
-        if min_blocks is not None:
-            cur.execute(f"SET pgcolumnar.index_min_blocks = {min_blocks}")
-        for _ in range(n):
-            cur.execute("EXPLAIN (COSTS OFF) SELECT count(*) FROM pc_main WHERE v > 3")
-        cur.execute("RESET pgcolumnar.index_min_blocks")
-        cur.execute("SELECT pg_stat_force_next_flush()")
-        cur.execute(
-            "SELECT relname, "
-            "  coalesce(heap_blks_read,0) + coalesce(heap_blks_hit,0) "
-            "+ coalesce(idx_blks_read,0) + coalesce(idx_blks_hit,0) "
-            "FROM pg_statio_all_tables "
-            "WHERE schemaname = 'pgcolumnar' AND relname = ANY(%s)",
-            (list(PLAN_CATS),),
-        )
-        per = {r[0]: int(r[1]) for r in cur.fetchall()}
+    sts = []
+    if min_blocks is not None:
+        sts.append(f"SET LOCAL pgcolumnar.index_min_blocks = {min_blocks}")
+    sts += ["EXPLAIN (COSTS OFF) SELECT count(*) FROM pc_main WHERE v > 3"] * n
+    per = {c: v[0] for c, v in _xact_work(conn, PLAN_CATS, sts).items()}
     return sum(per.values()), per
 
 
@@ -311,29 +301,113 @@ def test_planning_still_probes_a_populated_catalog(pgc_own_db, expect):
 
 
 def _storage_blocks(conn, relname):
-    """Blocks of `pgcolumnar.storage` that serve one PLANNED query over `relname`.
+    """Blocks of `pgcolumnar.storage` that serve one PLANNED query over `relname`,
+    with its sequential and index scans, counted in the plan's own transaction
+    (_xact_work, #1298).
 
     EXPLAIN without ANALYZE, so nothing here is the scan reading data.
-
-    FLUSH BEFORE THE RESET. This harness holds one connection, so the writes
-    that built the fixture leave pending statistics that `pg_stat_reset()` does
-    not clear and that land on top of the reading.
     """
+    return _xact_work(conn, ("storage",), [
+        f"EXPLAIN (COSTS OFF) SELECT a, b FROM {relname} WHERE a BETWEEN 3 AND 900"
+    ]).get("storage", (0, 0, 0))
+
+
+_XACT_PER = (
+    "SELECT t.relname, sum(pg_stat_get_xact_blocks_fetched(x.r))::bigint, "
+    "       sum(pg_stat_get_xact_numscans(x.r)) FILTER (WHERE x.r = t.oid)::bigint, "
+    "       coalesce(sum(pg_stat_get_xact_numscans(x.r)) FILTER (WHERE x.r <> t.oid), 0)::bigint "
+    "FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace "
+    "CROSS JOIN LATERAL (SELECT t.oid UNION ALL "
+    "                    SELECT indexrelid FROM pg_index WHERE indrelid = t.oid) x(r) "
+    "WHERE n.nspname = 'pgcolumnar' AND t.relname = ANY(%s) GROUP BY t.relname, t.oid"
+)
+
+
+def _xact_work(conn, catalogs, statements):
+    """{catalog: (blocks, seq_scans, index_scans)} for `catalogs`, heap and index,
+    while `statements` ran, counted by this backend for this transaction alone
+    (#1298).
+
+    NOT pg_statio_all_tables. That view is shared: another session's reads
+    reach it whenever that session flushes or exits, and
+    pg_stat_force_next_flush() flushes only the caller's own counts, so no
+    reset or flush keeps them out. Measured on PG18 with a second session
+    scanning the catalogs during one compaction: the shared reading rose by 28
+    to 120 buffers, this one by -3 to +18.
+
+    One transaction, read before and after: this backend reports nothing while
+    a transaction is open, so the difference is the statements' own work, and
+    pending counts left by the fixture's writes cancel out.
+    """
+    def read(cur):
+        cur.execute(_XACT_PER, (list(catalogs),))
+        return {r[0]: tuple(int(v) for v in r[1:]) for r in cur.fetchall()}
+
+    with conn.transaction(), conn.cursor() as cur:
+        before = read(cur)
+        for st in statements:
+            cur.execute(st)
+        after = read(cur)
+    return {c: tuple(a - b for a, b in zip(v, before.get(c, (0, 0, 0))))
+            for c, v in after.items()}
+
+
+def _stor_blocks(conn, statements):
+    """Blocks of `pgcolumnar.storage`, heap and index, read while `statements` ran."""
+    return _xact_work(conn, ("storage",), statements).get("storage", (0, 0, 0))[0]
+
+
+def _other_session(conn, sql):
+    """A statement that reads no catalog itself, but runs `sql` in a second
+    session inside it, through COPY ... TO PROGRAM, and waits for it to exit."""
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_stat_force_next_flush()")
+        cur.execute("SELECT setting FROM pg_config WHERE name = 'BINDIR'")
+        bindir = cur.fetchone()[0]
+    info = conn.info
+    return (f"COPY (SELECT 1) TO PROGRAM '{bindir}/psql -h {info.host} -p {info.port} "
+            f"-U {info.user} -d {info.dbname} -Atqc \"{sql}\" >/dev/null'")
+
+
+def test_a_storage_reading_takes_in_none_of_another_sessions_reads(pgc_own_db, expect):
+    """ANOTHER SESSION'S READS ARE NOT THIS PLAN'S WORK (#1298).
+
+    The storage arm compares two readings a block or two apart, so a reading
+    that takes in another session's reads of the catalog can hide a
+    regression. The measured statement reads no catalog itself; inside it a
+    second session scans pgcolumnar.storage and exits.
+    """
+    conn = pgc_own_db
+    with conn.cursor() as cur:
+        for i in range(1, 7):
+            # A row each: a columnar table gets its storage row on first write.
+            cur.execute(f"CREATE TABLE oth_{i} (a int) USING pgcolumnar")
+            cur.execute(f"INSERT INTO oth_{i} VALUES (1)")
+    other = _other_session(
+        conn, "SET enable_indexscan = off; SET enable_bitmapscan = off; "
+              "SELECT count(*) FROM pgcolumnar.storage")
+
+    # The control first: the second session really ran and really read the
+    # catalog. Its counts reach the shared view when it exits, so wait for them.
+    with conn.cursor() as cur:
         cur.execute("SELECT pg_stat_reset()")
-        cur.execute(f"EXPLAIN (COSTS OFF) SELECT a, b FROM {relname} WHERE a BETWEEN 3 AND 900")
-        cur.execute("SELECT pg_stat_force_next_flush()")
-        cur.execute(
-            "SELECT coalesce(heap_blks_read,0) + coalesce(heap_blks_hit,0)"
-            "     + coalesce(idx_blks_read,0) + coalesce(idx_blks_hit,0),"
-            "       coalesce(seq_scan,0), coalesce(idx_scan,0)"
-            "  FROM pg_statio_all_tables s"
-            "  JOIN pg_stat_all_tables t USING (relid)"
-            " WHERE s.schemaname = 'pgcolumnar' AND s.relname = 'storage'"
-        )
-        row = cur.fetchone()
-    return (int(row[0]), int(row[1]), int(row[2])) if row else (0, 0, 0)
+        cur.execute(other)
+        for _ in range(50):
+            cur.execute(
+                "SELECT coalesce(heap_blks_read,0) + coalesce(heap_blks_hit,0) "
+                "FROM pg_statio_all_tables "
+                "WHERE schemaname = 'pgcolumnar' AND relname = 'storage'")
+            other_reads = int(cur.fetchone()[0])
+            if other_reads > 0:
+                break
+            time.sleep(0.1)
+    expect.at_least(
+        other_reads, 1,
+        "premise: the second session's reads of pgcolumnar.storage reach the shared statistics",
+    )
+    expect.num(
+        _stor_blocks(conn, [other]), 0,
+        "a reading takes in none of another session's reads of pgcolumnar.storage (#1298)",
+    )
 
 
 def _storage_page_of(conn, relname):

@@ -1278,6 +1278,33 @@ q() {
 		-d "$PGC_DB" -At -c "$1" 2>/dev/null || true
 }
 
+# pgc_xact_blocks CATLIST SQL -- buffers the listed pgcolumnar catalogs, heap and
+# index, served while SQL ran, as "TOTAL|cat=N cat=N ...", counted by this
+# backend for this transaction alone (#1298).
+#
+# NOT pg_statio_all_tables. That view is shared: another session's reads reach it
+# whenever that session flushes or exits, and pg_stat_force_next_flush() flushes
+# only the caller's own counts, so no reset or flush keeps them out. Measured on
+# PG18 with a second session scanning the catalogs during one compaction: the
+# shared reading rose by 28 to 120 buffers, this one by -3 to +18.
+#
+# One q, so one transaction: the counts before and after SQL are taken with
+# nothing flushed in between, and the difference is SQL's own work. SQL must
+# therefore be statements a transaction block allows (not VACUUM).
+pgc_xact_blocks() {
+	local per="SELECT t.relname AS cat, sum(pg_stat_get_xact_blocks_fetched(x.r)) AS b
+		FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace
+		CROSS JOIN LATERAL (SELECT t.oid UNION ALL
+				    SELECT indexrelid FROM pg_index WHERE indrelid = t.oid) x(r)
+		WHERE n.nspname = 'pgcolumnar' AND t.relname IN ($1)
+		GROUP BY t.relname"
+	q "SELECT set_config('pgc.before', (SELECT json_object_agg(cat, b) FROM ($per) p)::text, true);
+	   $2
+	   SELECT sum(d)::text || '|' || string_agg(cat || '=' || d, ' ' ORDER BY cat)
+		FROM (SELECT p.cat, p.b - (current_setting('pgc.before')::json ->> p.cat)::bigint AS d
+			FROM ($per) p) z;" | tail -1
+}
+
 # Run a SQL file, returning At output.
 psql_file() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
