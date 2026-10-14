@@ -103,11 +103,11 @@ def test_the_direct_storage_paths_refuse_a_policy_restricted_caller(pgc_conn, pg
     expect.text(str(as_rls("SELECT has_table_privilege('rls_t','SELECT')")[0]), "True",
                 "premise: the role HOLDS select, so the ACL check cannot be what refuses")
     got, _ = as_rls("SELECT count(*) FROM rls_t")
-    expect.num(-1 if got is None else got, 1, "premise: the policy is in force for ordinary SQL")
+    expect.num(-1 if got is None else got, 1, "the policy is in force for ordinary SQL")
     expect.text(str(as_rls("SELECT has_function_privilege('pgcolumnar.read_projection(regclass,text)','EXECUTE')")[0]),
                 "True", "premise: the role holds EXECUTE, so the grant layer is not what refuses")
     expect.num(_one(conn, "SELECT count(*) FROM rls_t"), ROWS,
-               "premise: the owner sees every row, so the policy hides something real")
+               "the owner sees every row, so the policy hides something real")
     expect.text("yes" if all(os.path.getsize(f"{out}/{f}") > 0 for f in ("src.parquet", "src.arrow", "src.txt"))
                 else "no", "yes", "premise: the source files the import arms need exist")
 

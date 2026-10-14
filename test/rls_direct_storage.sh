@@ -92,18 +92,23 @@ verdict() {  # verdict <sql> -> rls | acl | allowed | other
 }
 
 # ---- premises, every one run BY the restricted role -------------------------
+#
+# Two of these read the table through the columnar scan, so a product change can
+# redden them, and they are checks, not premises (#1236; #1397 review): the policy's
+# row count, which the custom scan dropping its quals turned into every row, and the
+# owner's count.
 check "premise: the role can open a session" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_rls -d "$PGC_DB" -At -c 'SELECT 1;' 2>&1 | head -1)" "1"
 check "premise: the role HOLDS select, so the ACL check cannot be what refuses" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_rls -d "$PGC_DB" -At \
 		-c "SELECT has_table_privilege('rls_t','SELECT');" 2>&1 | head -1)" "t"
-check_num "premise: the policy is in force for ordinary SQL" \
+check_num "the policy is in force for ordinary SQL" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_rls -d "$PGC_DB" -At \
 		-c 'SELECT count(*) FROM rls_t;' 2>&1 | head -1)" "1"
 check "premise: the role holds EXECUTE, so the grant layer is not what refuses" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_rls -d "$PGC_DB" -At \
 		-c "SELECT has_function_privilege('pgcolumnar.read_projection(regclass,text)','EXECUTE');" 2>&1 | head -1)" "t"
-check_num "premise: the owner sees every row, so the policy hides something real" \
+check_num "the owner sees every row, so the policy hides something real" \
 	"$(q 'SELECT count(*) FROM rls_t;')" "$ROWS"
 check "premise: the source files the import arms need exist" \
 	"$([ -s "$OUT/src.parquet" ] && [ -s "$OUT/src.arrow" ] && [ -s "$OUT/src.txt" ] && echo yes || echo no)" "yes"
