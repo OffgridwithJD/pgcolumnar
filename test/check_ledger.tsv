@@ -1954,6 +1954,31 @@ native_join_vector_agg	native_join_vector_agg	unique join fold answer equals GUC
 native_join_vector_agg	native_join_vector_agg	unique join fold answer equals heap	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	unique join uses core Agg when GUC off	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	unique join uses vectorized agg when GUC on	15;16;17;18;19	2026-09-12	drop JOINREL fold
+objstore_credentials	objstore_credentials	a mapping with an access key and no secret is refused before any request (28000)	15;16;17;18;19	2026-10-14	the user-mapping credential pairing check removed (an access key alone crashes the backend)
+objstore_credentials	objstore_credentials	ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	ambient: a superuser with no mapping reads via the environment	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	ambient: carol (credentials_required=false) now reads via the environment	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	ambient: without her mapping, carol is refused despite the environment	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	and neither half-credential read reached the endpoint	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	and one with a secret and no access key is refused the same way	15;16;17;18;19	2026-10-14	the user-mapping credential pairing check removed (an access key alone crashes the backend)
+objstore_credentials	objstore_credentials	catalog: count(*) with catalog credentials only	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	catalog: mapping + server options reach the wire (differential)	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	control: a full mapping's read reaches the endpoint, so the log counts requests	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	no-leak: EXPLAIN VERBOSE carries no secret	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	no-leak: bob's verbose error carries no secret	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	no-leak: srvoptions carry no secret (by construction)	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	per-user: alice (good secret in her mapping) reads	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	per-user: bob (wrong secret in his mapping) is refused 28000	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: a credential on a USER MAPPING is accepted	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: a non-superuser cannot set credentials_required false (42501)	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: a superuser can (for carol, used below)	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: endpoint and region on the SERVER are accepted	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: endpoint on a TABLE is HV00D	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: endpoint on a USER MAPPING is HV00D	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: secret on a SERVER is HV00D	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	premise: bob's error was a real refusal, not silence	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	premise: sigv4 fixture server is up	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	premise: without mapping or environment, even a superuser gets 28000	15;16;17;18;19	never	-
 parallel_am_scan	parallel_am_scan	a parallel index build indexes every row of the table	15;16;17;18;19	never	-
 parallel_am_scan	parallel_am_scan	a parallel table-AM scan returns the same row count as serial	15;16;17;18;19	never	-
 parallel_am_scan	parallel_am_scan	premise: ANALYZE printed a rows= line per launched worker	15;16;17;18;19	never	-

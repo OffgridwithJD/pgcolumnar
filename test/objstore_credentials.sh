@@ -153,6 +153,45 @@ check "per-user: bob (wrong secret in his mapping) is refused 28000" \
 check "ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000" \
 	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_carol)" "28000"
 
+# ---- half a credential (#1341) ----------------------------------------------
+# A mapping holding access_key_id without secret_access_key, or the reverse, is a
+# misconfiguration, refused before any request rather than signed with half a key
+# or sent unsigned. Bob's wrong secret also ends in 28000, from the fixture's own
+# refusal, so the message is what tells this refusal apart, and the request log
+# says nothing was sent.
+for r in cred_dave cred_erin; do
+	psql_run "CREATE ROLE $r LOGIN; GRANT pg_read_server_files TO $r;
+	          GRANT USAGE ON FOREIGN SERVER csrv TO $r; GRANT SELECT ON fs3 TO $r;"
+done
+psql_run "CREATE USER MAPPING FOR cred_dave SERVER csrv OPTIONS (access_key_id '$AKID');
+          CREATE USER MAPPING FOR cred_erin SERVER csrv OPTIONS (secret_access_key '$SECRET');"
+refusal_as() {	# refusal_as ROLE SQL -> "SQLSTATE message" of its error, or "ok"
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -c "$2" 2>&1)"
+	case "$out" in *ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\): \(.*\)$/\1 \2/p' <<<"$out" | head -1;; *) echo "ok: $out";; esac
+}
+_half="28000 columnar: the user mapping for server \"csrv\" carries only half a credential"
+# Each arm starts on a server that accepts connections: a backend that crashes on
+# one arm must not fail the next one for it (measured: without the pairing check
+# the half-credential read does crash its backend).
+await_up() { local i; for i in $(seq 1 60); do [ "$(q 'SELECT 1' 2>/dev/null)" = 1 ] && return; sleep 0.5; done; }
+_log_lines() { wc -l < "$S3_LOG" 2>/dev/null || echo 0; }
+_reqs_before="$(_log_lines)"
+q_as cred_alice "SELECT count(*) FROM fs3" >/dev/null
+check "control: a full mapping's read reaches the endpoint, so the log counts requests" \
+	"$([ "$(( $(_log_lines) - _reqs_before ))" -gt 0 ] && echo reached || echo "nothing logged")" "reached"
+_reqs_before="$(_log_lines)"
+await_up
+check "a mapping with an access key and no secret is refused before any request (28000)" \
+	"$(refusal_as cred_dave "SELECT count(*) FROM fs3")" "$_half"
+await_up
+check "and one with a secret and no access key is refused the same way" \
+	"$(refusal_as cred_erin "SELECT count(*) FROM fs3")" "$_half"
+await_up
+check "and neither half-credential read reached the endpoint" \
+	"$(( $(_log_lines) - _reqs_before ))" "0"
+
 # ---- no-leak arm ------------------------------------------------------------
 BOB_ERR="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U cred_bob \
 	-d "$PGC_DB" -qtA 2>&1 <<SQLEOF
