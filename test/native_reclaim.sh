@@ -224,8 +224,15 @@ psql_run "DROP TABLE IF EXISTS ncap;
 	  SELECT pgcolumnar.set_options('ncap', stripe_row_limit => 1000);
 	  INSERT INTO ncap SELECT g, 'v'||g FROM generate_series(1, 10000) g;
 	  DELETE FROM ncap WHERE id % 2 = 0;"
-check "premise: ten row groups, every one half deleted" \
-	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('ncap');")|$(q "SELECT count(*) FROM ncap;")" "10|5000"
+# A check, not a premise (#1236; #1374 review): ten groups only if stripe_row_limit
+# is honoured. And per group, as the name says: each holds 500 live rows and 500
+# deleted, read from row_group and delete_vector, not only the table's total.
+check "ten row groups, every one half deleted" \
+	"$(q "SELECT count(*) || '|' || count(*) FILTER (WHERE g.row_count - coalesce(d.deleted_count, 0) = 500
+	                                         AND coalesce(d.deleted_count, 0) = 500)
+	   FROM pgcolumnar.row_group g LEFT JOIN pgcolumnar.delete_vector d
+	     ON d.storage_id = g.storage_id AND d.group_number = g.group_number
+	  WHERE g.storage_id = pgcolumnar.get_storage_id('ncap');")|$(q "SELECT count(*) FROM ncap;")" "10|10|5000"
 check "compact_rewrite with max_groups 3 rewrites three, then an uncapped call the other seven" \
 	"$(q "SELECT pgcolumnar.compact_rewrite('ncap', 0.1, 3);")|$(q "SELECT pgcolumnar.compact_rewrite('ncap', 0.1, 0);")|$(q "SELECT pgcolumnar.compact_rewrite('ncap', 0.1, 0);")" "3|7|0"
 check "and every live row is still there, once" \

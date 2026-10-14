@@ -2002,10 +2002,10 @@ native_reclaim	native_reclaim	maintenance_due(0.6) on a 50%-deleted table is not
 native_reclaim	native_reclaim	no free space yet	15;16;17;18;19	never	-
 native_reclaim	native_reclaim	premise: 10000 of nd's rows are deleted	15;16;17;18;19	never	-
 native_reclaim	native_reclaim	premise: nd holds 20000 rows	15;16;17;18;19	never	-
-native_reclaim	native_reclaim	premise: ten row groups, every one half deleted	15;16;17;18;19	never	-
 native_reclaim	native_reclaim	repeated recluster reuses space (file plateaus)	15;16;17;18;19	never	-
 native_reclaim	native_reclaim	reused-block data matches heap mirror	15;16;17;18;19	never	-
 native_reclaim	native_reclaim	row count correct after cycle	15;16;17;18;19	never	-
+native_reclaim	native_reclaim	ten row groups, every one half deleted	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	a mapping with an access key and no secret is refused before any request (28000)	15;16;17;18;19	2026-10-14	the user-mapping credential pairing check removed (an access key alone crashes the backend)
 objstore_credentials	objstore_credentials	ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	ambient: a superuser with no mapping reads via the environment	15;16;17;18;19	never	-
