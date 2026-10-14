@@ -2913,6 +2913,14 @@ pgcolumnar_truncate(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
 				 errmsg("pgcolumnar.truncate() cannot run inside a transaction block")));
 
+	/*
+	 * Owner-only, checked by OID before table_open, as the other maintenance
+	 * verbs do (#749, #1384). Checked after the open, a non-owner queued behind
+	 * the owner's lock, and every later request queued behind it; and the type
+	 * check below told it what kind of relation it had named.
+	 */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	/* serialize with other lazy maintenance (compact/recluster also take SUEL) */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -2923,8 +2931,6 @@ pgcolumnar_truncate(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	if (pgcolumnar_enable_end_truncation &&
 		ConditionalLockRelation(rel, AccessExclusiveLock))

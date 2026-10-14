@@ -115,6 +115,8 @@ def test_maintenance_refuses_a_non_owner_before_its_lock(pgc_cluster, pgc_conn, 
                     "owner", "compact_rewrite refuses a non-owner before taking its lock (#749)")
         expect.text(_outcome(pgc_cluster, schema, "SELECT pgcolumnar.compact('victim'::regclass)"), "owner",
                     "compact refuses a non-owner before taking its lock (#749)")
+        expect.text(_outcome(pgc_cluster, schema, "SELECT pgcolumnar.truncate('victim'::regclass)"), "owner",
+                    "truncate refuses a non-owner before taking its lock (#1384)")
 
         # ---- a non-owner learns only that it is not the owner
         expect.text(_heap_outcome(pgc_cluster, schema,
@@ -122,6 +124,8 @@ def test_maintenance_refuses_a_non_owner_before_its_lock(pgc_cluster, pgc_conn, 
                     "drop_projection tells a non-owner nothing about the relation type (#749)")
         expect.text(_heap_outcome(pgc_cluster, schema, "SELECT pgcolumnar.compact('heapvictim'::regclass)"), "owner",
                     "compact does the same, which is the behaviour drop_projection now matches")
+        expect.text(_heap_outcome(pgc_cluster, schema, "SELECT pgcolumnar.truncate('heapvictim'::regclass)"), "owner",
+                    "truncate tells a non-owner nothing about the relation type (#1384)")
 
         # WATCHED WHILE A REFUSED PROBE RUNS: asked after every probe had exited this
         # could not fail, because a timed-out request leaves the queue with its session
@@ -162,3 +166,13 @@ def test_maintenance_refuses_a_non_owner_before_its_lock(pgc_cluster, pgc_conn, 
     expect.text(owner_ok("SELECT pgcolumnar.add_projection('victim'::regclass, 'p1', ARRAY['id'])",
                          "SELECT pgcolumnar.drop_projection('victim'::regclass, 'p1')"), "ok",
                 "the owner can still add and drop a projection (#749 control)")
+    # truncate's own answer, a block count, so a call that never ran cannot satisfy it
+    try:
+        with pgc_conn.cursor() as cur:
+            cur.execute("SELECT pgcolumnar.truncate('victim'::regclass)")
+            blocks = cur.fetchone()[0]
+        counted = "counted" if isinstance(blocks, int) and blocks >= 0 else f"none:{blocks!r}"
+    except psycopg.Error as e:
+        counted = f"none:{e.sqlstate}"
+    expect.text(counted, "counted",
+                "the owner can still truncate the table, and is told how many blocks it returned (#1384 control)")

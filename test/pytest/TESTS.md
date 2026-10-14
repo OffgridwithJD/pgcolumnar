@@ -6943,7 +6943,7 @@ The pytest twin of `test/vacuum_lock_privilege.sh` (#749, ported for #1341), eve
 
 | test | what it holds |
 | --- | --- |
-| `test_maintenance_refuses_a_non_owner_before_its_lock` | the premises, the eight refusals under contention, the two heap-relation refusals, no lock request queued while a refused probe runs, the lock still held, and the owner controls |
+| `test_maintenance_refuses_a_non_owner_before_its_lock` | the premises, the nine refusals under contention (`truncate` among them, #1384), the three heap-relation refusals, no lock request queued while a refused probe runs, the lock still held, and the owner controls, `truncate`'s by its block count |
 
 ## 114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap
 

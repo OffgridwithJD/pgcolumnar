@@ -101,6 +101,8 @@ check "compact_rewrite refuses a non-owner before taking its lock (#749)" \
 	"$(outcome_under_contention "SELECT pgcolumnar.compact_rewrite('victim'::regclass, 0.2);")" "owner"
 check "compact refuses a non-owner before taking its lock (#749)" \
 	"$(outcome_under_contention "SELECT pgcolumnar.compact('victim'::regclass);")" "owner"
+check "truncate refuses a non-owner before taking its lock (#1384)" \
+	"$(outcome_under_contention "SELECT pgcolumnar.truncate('victim'::regclass);")" "owner"
 
 # A non-owner asking about a relation they do not own must learn only that they
 # are not the owner. drop_projection checked the relation TYPE first, so it
@@ -122,6 +124,8 @@ check "drop_projection tells a non-owner nothing about the relation type (#749)"
 	"$(notowner_heap "SELECT pgcolumnar.drop_projection('heapvictim'::regclass, 'p1');")" "owner"
 check "compact does the same, which is the behaviour drop_projection now matches" \
 	"$(notowner_heap "SELECT pgcolumnar.compact('heapvictim'::regclass);")" "owner"
+check "truncate tells a non-owner nothing about the relation type (#1384)" \
+	"$(notowner_heap "SELECT pgcolumnar.truncate('heapvictim'::regclass);")" "owner"
 
 # The caller must never enter the lock queue. WATCHED WHILE A REFUSED PROBE RUNS:
 # asked after every probe had exited, this could not fail, because a timed-out
@@ -167,5 +171,9 @@ check "the owner can still compact the table (#749 control)" \
 check "the owner can still add and drop a projection (#749 control)" \
 	"$(ran_ok postgres "SELECT pgcolumnar.add_projection('victim'::regclass, 'p1', ARRAY['id']);
 	                     SELECT pgcolumnar.drop_projection('victim'::regclass, 'p1');")" "ok"
+# The #1384 control reads truncate's own answer, a block count, so a session that
+# never ran the call cannot satisfy it.
+check "the owner can still truncate the table, and is told how many blocks it returned (#1384 control)" \
+	"$(tr_out="$(as_super -c "SELECT pgcolumnar.truncate('victim'::regclass);")"; [[ "$tr_out" =~ ^[0-9]+$ ]] && echo counted || echo none)" "counted"
 
 pgc_summary
