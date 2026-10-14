@@ -656,4 +656,6 @@ guard_tests 433
 #
 # cluster_tests 551 -> 558 for #1341's test_am_contracts.py, the twin of
 # test/am_contracts.sh: seven tests, by collection over the cluster files on this tree.
-cluster_tests 558
+# cluster_tests 558 -> 559 for #1341's test_objstore_credentials.py, the twin of
+# objstore_credentials.sh: one test, by collection over the cluster files on this tree.
+cluster_tests 559

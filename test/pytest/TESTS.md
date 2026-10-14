@@ -156,6 +156,7 @@ behaviour, the source of that number is named.
 - [108. test_arrow_import.py: import_arrow round trips, reads a foreign file, and refuses what it cannot decode](#108-test_arrow_importpy-import_arrow-round-trips-reads-a-foreign-file-and-refuses-what-it-cannot-decode)
 - [109. test_entry_point_privilege.py: every relation-taking entry point has a decided privilege bar](#109-test_entry_point_privilegepy-every-relation-taking-entry-point-has-a-decided-privilege-bar)
 - [110. test_am_contracts.py: contracts the access method owes core DML and transactions](#110-test_am_contractspy-contracts-the-access-method-owes-core-dml-and-transactions)
+- [111. test_objstore_credentials.py: object-store credentials live on a user mapping, and the environment is a privilege](#111-test_objstore_credentialspy-object-store-credentials-live-on-a-user-mapping-and-the-environment-is-a-privilege)
 
 ## 1. How to read a test in here
 
@@ -6906,3 +6907,13 @@ THE WITHDRAWAL IS REACHED ONLY BY A RACE. When one session holds a key uncommitt
 | `test_an_aborted_inner_block_keeps_the_outer_statements_rows` | an outer `INSERT` and an outer `DELETE` whose expression calls a function with an aborted EXCEPTION block keep heap's answer. Before #1341's fix the INSERT kept 1 row of 5000. The same loss through a read inside the block is #1360 |
 | `test_an_insert_racing_an_uncommitted_delete_of_its_key` | an insert of a key whose delete (or key-changing update) is uncommitted waits, then fails with 23505 if the delete rolls back and succeeds if it commits: never two rows with the key. Before #1341's fix the rollback left two |
 | `test_an_index_built_after_a_delete_serves_an_older_snapshot` | a REPEATABLE READ snapshot from before a committed DELETE still finds the row through an index built after it (an Index Scan, asserted), and a new snapshot does not; a UNIQUE index still builds over a key whose other holder is deleted. Before #1341's fix the old snapshot's lookup found 0 |
+
+## 111. test_objstore_credentials.py: object-store credentials live on a user mapping, and the environment is a privilege
+
+The pytest twin of `test/objstore_credentials.sh` (#393 M4, ported for #1341), every check by the shell's name. Its fixture server is its own: an http.server in a thread that verifies every request's AWS Signature Version 4 from the spec with the standard library, so a green read proves the C signer and an independent implementation agree, and that records every request. A private cluster, because phase 2 restarts the postmaster with `AWS_*` in its environment; phase 1 starts it with every `AWS_*` of the test process removed. Secrets misplaced on a server, table or (for an endpoint) a mapping are refused `HV00D`; only a superuser may set `credentials_required 'false'`; each role's own mapping decides its read (a wrong secret is `28000` from the server); a mapping with half a credential is refused `28000` by its own message before any request; no secret reaches an error, `EXPLAIN VERBOSE` or `srvoptions`; and with the environment present, only a superuser or a `credentials_required 'false'` mapping may use it.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_object_store_credentials` | placement, per-user resolution, the half-credential refusals and the request count behind them, no leak, and ambient credentials as a privilege across the restart |
