@@ -223,6 +223,74 @@ def test_partition_create_ahead(pgc_conn, expect):
     expect.text(f"{capped}|{_kids(conn, 'capped')}", "55000|1",
                 "a parent with a partition bounded by MAXVALUE is refused, and nothing is created")
 
+    # Refused before any DDL, each by its own check (#1341). The message is in the
+    # want: with the width check gone, a zero or negative width never moves the
+    # counting loop on, and the 1000-partition cap answers with the same 22023.
+    def refusal(sql):
+        try:
+            return f"ok: {_one(conn, sql)}"
+        except psycopg.Error as e:
+            return f"{e.sqlstate} {e.diag.message_primary}"
+
+    def name(t):
+        # As the function's messages name it: regclass formatted under its own
+        # search_path (pg_catalog, pg_temp), so always schema-qualified.
+        return _one(conn, "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c"
+                          f" JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = '{t}'::regclass")
+
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE wid (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
+    bad = "22023 width must be positive and ahead not negative"
+    expect.text("|".join([refusal("SELECT pgcolumnar.partition_create_ahead('wid', '0 seconds', 1)"),
+                          refusal("SELECT pgcolumnar.partition_create_ahead('wid', '-6 hours', 1)"),
+                          refusal("SELECT pgcolumnar.partition_create_ahead('wid', '6 hours', -1)"),
+                          str(_kids(conn, "wid"))]),
+                f"{bad}|{bad}|{bad}|0",
+                "a width that is not positive, or a negative lead, is refused before any DDL")
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE lst (at timestamptz NOT NULL, reading float8) PARTITION BY LIST (at)")
+        cur.execute("CREATE TABLE two (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at, reading)")
+        cur.execute("CREATE TABLE flat (at timestamptz NOT NULL, reading float8) USING pgcolumnar")
+    expect.text("|".join([refusal(f"SELECT pgcolumnar.partition_create_ahead('{t}', '6 hours', 1)")
+                          for t in ("lst", "two", "flat")] + [str(_kids(conn, "lst")), str(_kids(conn, "two"))]),
+                "|".join(f"55000 {name(t)} is not RANGE-partitioned on one column"
+                         for t in ("lst", "two", "flat")) + "|0|0",
+                "a parent that is not RANGE-partitioned on one column is refused before any DDL")
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE bydate (day date NOT NULL, reading float8) PARTITION BY RANGE (day)")
+        cur.execute("CREATE TABLE byint (n int NOT NULL, reading float8) PARTITION BY RANGE (n)")
+    expect.text("|".join([refusal("SELECT pgcolumnar.partition_create_ahead('bydate', '6 hours', 1)"),
+                          refusal("SELECT pgcolumnar.partition_create_ahead('byint', '6 hours', 1)"),
+                          str(_kids(conn, "bydate")), str(_kids(conn, "byint"))]),
+                f"55000 {name('bydate')} is partitioned on date, not on a timestamp"
+                f"|55000 {name('byint')} is partitioned on integer, not on a timestamp|0|0",
+                "a parent partitioned on a key that is not a timestamp is refused before any DDL")
+
+    # Month and year widths (#1341): date_bin cannot bin by either, so the first
+    # partition starts on the first of this month and each bound adds the width.
+    def calendar(t, key, step, now_expr):
+        return _one(conn, f"SELECT count(*) FILTER (WHERE f = date_trunc('month', f) AND t = f + interval '{step}')"
+                          f" || '|' || (min(f) = date_trunc('month', {now_expr}))"
+                          f" FROM (SELECT (regexp_match(pg_get_expr(c.relpartbound, c.oid),"
+                          f" 'FROM \\(''([^'']+)''\\) TO \\(''([^'']+)''\\)'))[1]::{key} AS f,"
+                          f" (regexp_match(pg_get_expr(c.relpartbound, c.oid),"
+                          f" 'FROM \\(''([^'']+)''\\) TO \\(''([^'']+)''\\)'))[2]::{key} AS t"
+                          f" FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
+                          f" WHERE i.inhparent = '{t}'::regclass) b")
+
+    for key, now_expr in (("timestamptz", "now()"), ("timestamp", "localtimestamp")):
+        t = f"monthly_{key}"
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {t} (at {key} NOT NULL, reading float8) PARTITION BY RANGE (at)")
+        made = value_or_state(f"SELECT pgcolumnar.partition_create_ahead('{t}', '1 month', 2)")
+        expect.text(f"{made}|{calendar(t, key, '1 month', now_expr)}", "3|3|true",
+                    f"a {key} parent with a month width starts at this month's first and steps by calendar months")
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE yearly (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
+    made = value_or_state("SELECT pgcolumnar.partition_create_ahead('yearly', '1 year', 1)")
+    expect.text(f"{made}|{calendar('yearly', 'timestamptz', '1 year', 'now()')}", "2|2|true",
+                "a year width starts at this month's first and steps by calendar years")
+
     # Refused: a DEFAULT partition.
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE fallback (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
@@ -355,6 +423,9 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
     expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xw', '2019-05-01 06:00+00'::timestamptz)") + "|"
                 + sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xl', '2019-04-01 00:00'::timestamp)"),
                 "42804|42804", "a cutoff of the other timestamp type is refused")
+    expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xl', NULL::timestamptz)") + "|"
+                + sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xw', NULL::timestamp)"),
+                "22023|22023", "a NULL cutoff is refused, in both overloads")
 
     # MINVALUE below is listed once its upper bound is past; MAXVALUE above never.
     with conn.cursor() as cur:

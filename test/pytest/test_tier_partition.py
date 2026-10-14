@@ -292,6 +292,19 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
     expect.text(f"{_sqlstate(conn, _tier('uq', p))}|{refused('uq', p)}", f"0A000|{ub}|r|nofile",
                 "a parent with a UNIQUE index is refused before anything moves")
 
+    # A server that does not exist (#1341): refused by its own branch, before the
+    # export. Core's own error would come later, with the file already written.
+    _build(conn, "ns")
+    nb = _digest(conn, "ns")
+    p = server_dir / "ns.parquet"
+    ns_state = _sqlstate(conn, f"SELECT pgcolumnar.tier_partition('ns_mar', 'tq_no_such', '{p}')")
+    expect.text(f"{ns_state}|{refused('ns', p)}", f"42704|{nb}|r|nofile",
+                "a server that does not exist is refused before anything moves")
+
+    # The fault hook's own guard (#1341).
+    expect.text(_sqlstate(conn, "SET pgcolumnar.tier_fault_after = 'exprot'"), "22023",
+                "a fault step that is not one of tier_partition's is refused")
+
     _build(conn, "dep")
     db = _digest(conn, "dep")
     # Each dependent made and removed one statement at a time, with a premise that

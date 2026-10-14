@@ -1770,4 +1770,17 @@ suites_not_covered 246
 #     never         1802 + 1 = 1803
 #     dated          523 + 1 =  524
 #     1803 + 524 == 2327
+#
+# Missing tests in the partition lifecycle and tiering (#1341, OffgridwithJD):
+# 1803 -> 1803. Nine new arms, each dated by the mutation that removes the branch
+# it tests: partition_create_ahead's width/ahead, RANGE-on-one-column and
+# timestamp-key checks and its month/year branch (three arms); partition_drop_plan's
+# NULL-cutoff check; tier_partition's missing-server branch; the tier_fault_after
+# check hook. From five-major runs: partition_lifecycle 59/59, and tier_partition
+# 73/73 on 18-19 and 72 + 1 named SKIP on 15-17.
+#
+#     ledger rows   2327 + 9 = 2336
+#     never         1803 + 0 = 1803
+#     dated          524 + 9 =  533
+#     1803 + 533 == 2336
 checks_never_observed_red 1803
