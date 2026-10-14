@@ -631,4 +631,6 @@ guard_tests 429
 # in test_ttl_expire.py, by collection over the cluster files on this branch.
 # cluster_tests 533 -> 534 for #1341's test_expire_refuses_what_it_cannot_honour in
 # test_ttl_expire.py, by collection over the cluster files on this tree.
-cluster_tests 534
+# cluster_tests 534 -> 538 for #1341's test_import_export_privilege.py, the twin of
+# import_export_privilege.sh: four tests, by collection over the cluster files on this tree.
+cluster_tests 538

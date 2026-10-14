@@ -150,6 +150,7 @@ behaviour, the source of that number is named.
 - [102. test_column_extent.py: the per-column extent is a true bound, recomputed whenever groups go](#102-test_column_extentpy-the-per-column-extent-is-a-true-bound-recomputed-whenever-groups-go)
 - [103. test_collation_change.py: a collation change without a rewrite leaves columnar answering as heap does](#103-test_collation_changepy-a-collation-change-without-a-rewrite-leaves-columnar-answering-as-heap-does)
 - [104. test_build_needs_pg_config.py: a build with no pg_config refuses, it does not wait on stdin](#104-test_build_needs_pg_configpy-a-build-with-no-pg_config-refuses-it-does-not-wait-on-stdin)
+- [105. test_import_export_privilege.py: import and export check the table's privilege, serial and parallel](#105-test_import_export_privilegepy-import-and-export-check-the-tables-privilege-serial-and-parallel)
 
 ## 1. How to read a test in here
 
@@ -6808,3 +6809,18 @@ Needs no cluster and no driver.
 | --- | --- |
 | `test_with_stdin_open_it_ends_and_names_pg_config` | with stdin open and silent, make ends within 20 seconds, and its own `*** ... Stop.` error names `PG_CONFIG`. The pipe really is one a reader waits on (premise) |
 | `test_with_stdin_closed_it_still_refuses` | with stdin closed, make exits non-zero rather than 0 |
+
+## 105. test_import_export_privilege.py: import and export check the table's privilege, serial and parallel
+
+The pytest twin of `test/import_export_privilege.sh` (#559, #566), with the parallel twins' arms both halves gained in #1341. The attacker role holds every outer layer: USAGE on schema pgcolumnar, EXECUTE, and both server-file roles. It holds no privilege on `victim`, so the table ACL is the only refuser. A refusal is SQLSTATE 42501 with a message naming the table, where the shell twin greps "permission denied for table". Real logins, not `SET ROLE`, and every file is in `server_dir`.
+
+`parallel_copy` and `parallel_export_parquet` always checked INSERT and SELECT, and nothing asked them. Their loaders and workers skip the executor's permission check, so that check is the only one.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_premises_isolate_the_table_acl` | the attacker logs in, holds both server-file roles, schema USAGE and EXECUTE, and nothing on `victim`; `victim` has its rows; the attacker's own source files exist |
+| `test_a_table_the_caller_holds_no_grant_on_is_refused` | the seven deny arms, serial and parallel, in the shell's order; then `victim` keeps exactly its rows and no file of it was written |
+| `test_the_owner_is_not_refused` | the owner's own exports, storage id and import are not refused |
+| `test_the_owner_runs_the_parallel_twins` | the owner's `parallel_copy` loads its 50 rows, and its `parallel_export_parquet` writes some |
