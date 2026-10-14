@@ -444,11 +444,18 @@ check "a partition named with the drop block's dollar-quote tag is dropped by th
 check "a drop plan for a parent with a DEFAULT partition is refused" \
 	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('td', now())")" "55000"
 q "CREATE TABLE dn (k int NOT NULL) PARTITION BY RANGE (k);
-   CREATE TABLE dnl (k int);" >/dev/null
-# Each by its own check, so the message is in the want (#1339): both answer 55000,
-# and with one check gone the other could still answer it.
+   CREATE TABLE dnl (k int);
+   CREATE TABLE dls (ts timestamptz NOT NULL) PARTITION BY LIST (ts);
+   CREATE TABLE dr2 (ts timestamptz NOT NULL, k int NOT NULL) PARTITION BY RANGE (ts, k);" >/dev/null
+# Each by its own check, so the message is in the want (#1339): both answer 55000.
 check "a drop plan for a parent not partitioned on a timestamp is refused" \
-	"$(refusal "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dn', now())")|$(refusal "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dnl', now())")" \
-	"55000 $(rc dn) is partitioned on integer, not on a timestamp|55000 $(rc dnl) is not RANGE-partitioned on one column"
+	"$(refusal "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dn', now())")" \
+	"55000 $(rc dn) is partitioned on integer, not on a timestamp"
+# The RANGE-on-one-column check had only an unpartitioned table to refuse, which
+# NOT FOUND refuses alone. A LIST parent and a two-column RANGE parent, both led by
+# a timestamptz, pass the key check: only strat and natts stop them.
+check "a drop plan for a parent not RANGE-partitioned on one column is refused, LIST and two-column RANGE included" \
+	"$(for t in dnl dls dr2; do refusal "SELECT count(*) FROM pgcolumnar.partition_drop_plan('$t', now())"; done | paste -sd'|')" \
+	"55000 $(rc dnl) is not RANGE-partitioned on one column|55000 $(rc dls) is not RANGE-partitioned on one column|55000 $(rc dr2) is not RANGE-partitioned on one column"
 
 pgc_summary

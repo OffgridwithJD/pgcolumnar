@@ -569,6 +569,8 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
         cur.execute("CREATE TABLE xd_default PARTITION OF xd DEFAULT USING pgcolumnar")
         cur.execute("CREATE TABLE xn (k bigint NOT NULL) PARTITION BY RANGE (k)")
         cur.execute("CREATE TABLE xnl (k int)")
+        cur.execute("CREATE TABLE xls (ts timestamptz NOT NULL) PARTITION BY LIST (ts)")
+        cur.execute("CREATE TABLE xr2 (ts timestamptz NOT NULL, k int NOT NULL) PARTITION BY RANGE (ts, k)")
     expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xd', now())"), "55000",
                 "a drop plan for a parent with a DEFAULT partition is refused")
     # Each by its own check, so the message is in the want (#1339): both answer
@@ -583,8 +585,13 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
         return _one(conn, "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c"
                           f" JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = '{t}'::regclass")
 
-    expect.text(refusal("SELECT count(*) FROM pgcolumnar.partition_drop_plan('xn', now())") + "|"
-                + refusal("SELECT count(*) FROM pgcolumnar.partition_drop_plan('xnl', now())"),
-                f"55000 {name('xn')} is partitioned on bigint, not on a timestamp|"
-                f"55000 {name('xnl')} is not RANGE-partitioned on one column",
+    expect.text(refusal("SELECT count(*) FROM pgcolumnar.partition_drop_plan('xn', now())"),
+                f"55000 {name('xn')} is partitioned on bigint, not on a timestamp",
                 "a drop plan for a parent not partitioned on a timestamp is refused")
+    # The RANGE-on-one-column check had only an unpartitioned table to refuse, which
+    # NOT FOUND refuses alone. A LIST parent and a two-column RANGE parent, both led
+    # by a timestamptz, pass the key check: only strat and natts stop them.
+    expect.text("|".join(refusal(f"SELECT count(*) FROM pgcolumnar.partition_drop_plan('{t}', now())")
+                         for t in ("xnl", "xls", "xr2")),
+                "|".join(f"55000 {name(t)} is not RANGE-partitioned on one column" for t in ("xnl", "xls", "xr2")),
+                "a drop plan for a parent not RANGE-partitioned on one column is refused, LIST and two-column RANGE included")
