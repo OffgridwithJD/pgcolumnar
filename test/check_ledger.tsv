@@ -2100,10 +2100,12 @@ native_reclaim	native_reclaim	reused-block data matches heap mirror	15;16;17;18;
 native_reclaim	native_reclaim	row count correct after cycle	15;16;17;18;19	never	-
 native_reclaim	native_reclaim	ten row groups, every one half deleted	15;16;17;18;19	2026-10-14	the write state ignores stripe_row_limit
 objstore_credentials	objstore_credentials	a mapping with an access key and no secret is refused before any request (28000)	15;16;17;18;19	2026-10-14	the user-mapping credential pairing check removed (an access key alone crashes the backend)
+objstore_credentials	objstore_credentials	a role with no mapping of its own reads through the PUBLIC mapping	15;16;17;18;19	2026-10-14	the user-mapping lookup has no PUBLIC fallback
+objstore_credentials	objstore_credentials	a role's own mapping is used before the PUBLIC one (bob's wrong secret is still refused 28000)	15;16;17;18;19	2026-10-14	the user-mapping lookup tries PUBLIC before the role's own
 objstore_credentials	objstore_credentials	ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	ambient: a superuser with no mapping reads via the environment	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	ambient: carol (credentials_required=false) now reads via the environment	15;16;17;18;19	never	-
-objstore_credentials	objstore_credentials	ambient: without her mapping, carol is refused despite the environment	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	ambient: without her mapping, carol is refused despite the environment	15;16;17;18;19	2026-10-14	every mapping may use the server's ambient credentials (allow_ambient = true)
 objstore_credentials	objstore_credentials	and neither half-credential read reached the endpoint	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	and one with a secret and no access key is refused the same way	15;16;17;18;19	2026-10-14	the user-mapping credential pairing check removed (an access key alone crashes the backend)
 objstore_credentials	objstore_credentials	catalog: count(*) with catalog credentials only	15;16;17;18;19	never	-
@@ -2115,7 +2117,7 @@ objstore_credentials	objstore_credentials	no-leak: srvoptions carry no secret (b
 objstore_credentials	objstore_credentials	per-user: alice (good secret in her mapping) reads	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	per-user: bob (wrong secret in his mapping) is refused 28000	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	placement: a credential on a USER MAPPING is accepted	15;16;17;18;19	never	-
-objstore_credentials	objstore_credentials	placement: a non-superuser cannot set credentials_required false (42501)	15;16;17;18;19	never	-
+objstore_credentials	objstore_credentials	placement: a non-superuser cannot set credentials_required false (42501)	15;16;17;18;19	2026-10-14	the validator lets a non-superuser set credentials_required false
 objstore_credentials	objstore_credentials	placement: a superuser can (for carol, used below)	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	placement: endpoint and region on the SERVER are accepted	15;16;17;18;19	never	-
 objstore_credentials	objstore_credentials	placement: endpoint on a TABLE is HV00D	15;16;17;18;19	never	-

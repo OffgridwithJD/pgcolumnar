@@ -55,12 +55,21 @@ pg_restart_env() {
 	echo "FATAL: cluster did not come back after env restart"; exit 1
 }
 
-sqlstate_of() {  # sqlstate_of <sql> [role]
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "${2:-postgres}" \
-		-d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+# sqlstate_of <sql> [role] -> the SQLSTATE the statement fails with; "ok" only when
+# psql ran it and exited 0; "noconnect" when there was no session to run it in. Success
+# is positive evidence (#1400 review): an empty capture, which a session that never
+# connected also gives, is never read as success.
+sqlstate_of() {
+	local out rc st
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "${2:-postgres}" \
+		-d "$PGC_DB" -qtA -v ON_ERROR_STOP=1 2>&1 <<SQLEOF
 \\set VERBOSITY sqlstate
 $1;
 SQLEOF
+)"
+	rc=$?
+	st="$(sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1)"
+	if [ -n "$st" ]; then echo "$st"; elif [ "$rc" = 0 ]; then echo ok; else echo noconnect; fi
 }
 q_as() {  # q_as <role> <sql>
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" \
@@ -112,7 +121,7 @@ check "placement: endpoint and region on the SERVER are accepted" \
 	"$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'csrv'")" "1"
 check "placement: a credential on a USER MAPPING is accepted" \
 	"$(sqlstate_of "CREATE USER MAPPING FOR postgres SERVER csrv
-	   OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET')")" ""
+	   OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET')")" "ok"
 check "placement: endpoint on a USER MAPPING is HV00D" \
 	"$(sqlstate_of "CREATE USER MAPPING FOR cred_alice SERVER csrv OPTIONS (endpoint 'x')")" "HV00D"
 
@@ -125,7 +134,7 @@ psql_run "CREATE USER MAPPING FOR cred_bob SERVER csrv
 check "placement: a non-superuser cannot set credentials_required false (42501)" \
 	"$(sqlstate_of "ALTER USER MAPPING FOR cred_alice SERVER csrv OPTIONS (ADD credentials_required 'false')" cred_alice)" "42501"
 check "placement: a superuser can (for carol, used below)" \
-	"$(sqlstate_of "CREATE USER MAPPING FOR cred_carol SERVER csrv OPTIONS (credentials_required 'false')")" ""
+	"$(sqlstate_of "CREATE USER MAPPING FOR cred_carol SERVER csrv OPTIONS (credentials_required 'false')")" "ok"
 
 # ---- tables -----------------------------------------------------------------
 psql_run "CREATE FOREIGN TABLE flocal ($COLDEFS) SERVER csrv OPTIONS (path '$PGC_WORKDIR/$BUCKET/fixture.parquet');"
@@ -208,6 +217,22 @@ check_num "no-leak: EXPLAIN VERBOSE carries no secret" \
 	"$(grep -c -e "$SECRET" -e "$BADSECRET" <<<"$EXPL")" "0"
 check_num "no-leak: srvoptions carry no secret (by construction)" \
 	"$(q "SELECT count(*) FROM pg_foreign_server WHERE srvoptions::text LIKE '%$SECRET%'")" "0"
+
+# ---- a PUBLIC mapping (#1341) ----------------------------------------------
+# sql-reference.md: a read resolves the scanning user's own mapping first, then a
+# PUBLIC one. Frank has no mapping of his own; bob's own carries the wrong secret, so
+# a PUBLIC mapping holding the right one must not rescue him. Dropped again before
+# phase 2, where a PUBLIC mapping would answer for the ambient arms.
+psql_run "CREATE ROLE cred_frank LOGIN; GRANT pg_read_server_files TO cred_frank;
+          GRANT USAGE ON FOREIGN SERVER csrv TO cred_frank; GRANT SELECT ON fs3 TO cred_frank;"
+psql_run "CREATE USER MAPPING FOR PUBLIC SERVER csrv
+          OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET');"
+# A refused read counts no rows, so a refusal is a measurement and not an empty capture.
+check_num "a role with no mapping of its own reads through the PUBLIC mapping" \
+	"$(c="$(q_as cred_frank "SELECT count(*) FROM fs3")"; echo "${c:-0}")" "$((G * ROWS_PER_GROUP))"
+check "a role's own mapping is used before the PUBLIC one (bob's wrong secret is still refused 28000)" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_bob)" "28000"
+psql_run "DROP USER MAPPING FOR PUBLIC SERVER csrv;"
 
 # ---- phase 2: environment present; ambient is still a privilege -------------
 pg_restart_env "AWS_ENDPOINT_URL='http://127.0.0.1:$S3_PORT'" \
