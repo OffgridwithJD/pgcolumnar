@@ -153,6 +153,37 @@ check "per-user: bob (wrong secret in his mapping) is refused 28000" \
 check "ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000" \
 	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_carol)" "28000"
 
+# ---- half a credential (#1341) ----------------------------------------------
+# A mapping holding access_key_id without secret_access_key, or the reverse, is a
+# misconfiguration, refused before any request rather than signed with half a key
+# or sent unsigned. Bob's wrong secret also ends in 28000, from the fixture's own
+# refusal, so the message is what tells this refusal apart, and the request log
+# says nothing was sent.
+for r in cred_dave cred_erin; do
+	psql_run "CREATE ROLE $r LOGIN; GRANT pg_read_server_files TO $r;
+	          GRANT USAGE ON FOREIGN SERVER csrv TO $r; GRANT SELECT ON fs3 TO $r;"
+done
+psql_run "CREATE USER MAPPING FOR cred_dave SERVER csrv OPTIONS (access_key_id '$AKID');
+          CREATE USER MAPPING FOR cred_erin SERVER csrv OPTIONS (secret_access_key '$SECRET');"
+refusal_as() {	# refusal_as ROLE SQL -> "SQLSTATE message" of its error, or "ok"
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -c "$2" 2>&1)"
+	case "$out" in *ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\): \(.*\)$/\1 \2/p' <<<"$out" | head -1;; *) echo "ok: $out";; esac
+}
+_half="28000 columnar: the user mapping for server \"csrv\" carries only half a credential"
+_reqs_before="$(wc -l < "$S3_LOG" 2>/dev/null || echo 0)"
+check "a mapping with an access key and no secret is refused before any request (28000)" \
+	"$(refusal_as cred_dave "SELECT count(*) FROM fs3")" "$_half"
+check "and one with a secret and no access key is refused the same way" \
+	"$(refusal_as cred_erin "SELECT count(*) FROM fs3")" "$_half"
+check "and neither half-credential read reached the endpoint" \
+	"$(( $(wc -l < "$S3_LOG" 2>/dev/null || echo 0) - _reqs_before ))" "0"
+_reqs_before="$(wc -l < "$S3_LOG" 2>/dev/null || echo 0)"
+q_as cred_alice "SELECT count(*) FROM fs3" >/dev/null
+check "control: alice's read in the same way does reach it, so the log counts requests" \
+	"$([ "$(( $(wc -l < "$S3_LOG" 2>/dev/null || echo 0) - _reqs_before ))" -gt 0 ] && echo reached || echo "nothing logged")" "reached"
+
 # ---- no-leak arm ------------------------------------------------------------
 BOB_ERR="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U cred_bob \
 	-d "$PGC_DB" -qtA 2>&1 <<SQLEOF
