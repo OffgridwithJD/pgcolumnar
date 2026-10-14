@@ -1991,4 +1991,15 @@ suites_not_covered 242
 #     never         1918 + 7 = 1925
 #     dated          579 + 1 =  580
 #     1925 + 580 == 2505
-checks_never_observed_red 1925
+#
+# fdw_plan_privilege (jdatcmd): 1925 -> 1930. A new suite, seeded from five-major runs
+# (8/8 on each of 15-19). Three arms arrive dated: the two Iceberg ones by the planner
+# reading metadata_path for any role (main's code), the Parquet one by its
+# pg_read_server_files gate removed. Five arrive never: two premises, two privileged
+# controls, and the scan's 42501, which neither mutation touches.
+#
+#     ledger rows   2505 + 8     = 2513
+#     never         1925 + 8 - 3 = 1930
+#     dated          580 + 3     =  583
+#     1930 + 583 == 2513
+checks_never_observed_red 1930
