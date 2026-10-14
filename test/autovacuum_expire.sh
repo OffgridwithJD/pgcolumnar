@@ -195,9 +195,9 @@ tz_mk() {	# tz_mk TABLE: built with the daemon's expire off, so no pass sees hal
 	done
 }
 tz_cut() { q "SELECT ((now() AT TIME ZONE '$1')::date - 1)::text;"; }
-tz_expire() {	# tz_expire on|off
-	psql_run "ALTER SYSTEM SET pgcolumnar.autovacuum_expire = $1;"
-	psql_run "SELECT pg_reload_conf();"
+tz_expire() {	# tz_expire on|off  (silent: tz_first's output is its answer)
+	psql_run "ALTER SYSTEM SET pgcolumnar.autovacuum_expire = $1;" >/dev/null
+	psql_run "SELECT pg_reload_conf();" >/dev/null
 	[ "$1" = off ] && sleep 5
 }
 # tz_first TABLE ZONE -> "match" if the first surviving day is the zone's cutoff, read
