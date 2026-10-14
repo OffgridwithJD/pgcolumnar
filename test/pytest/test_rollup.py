@@ -533,5 +533,19 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(refused("q_c", "1 hour", "{min}", "{humidity}"), "22023",
                 "an aggregate column the source does not have is refused")
     expect.text(refused("q_s", "1 hour", "{max}", "{*}"), "22023", "* with anything but count is refused")
-    expect.num(_one(conn, "SELECT count(*) FROM pg_class WHERE relname IN ('q_m', 'q_p', 'q_l', 'q_c', 'q_s')"), 0,
+    # The rest of create_rollup's refusals, and rebase_rollup's (#1341). A timestamp
+    # (no zone) source column would be bucketed in whatever zone the refresh runs in.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE feed_lt (at timestamp, temp float8) USING pgcolumnar")
+    expect.text(_state(conn, f"SELECT pgcolumnar.create_rollup('q_t', 'feed_lt', 'at', '1 hour', '{ORIGIN}',"
+                             f" '{{}}', '{{count}}', '{{*}}')"),
+                "22023", "a ts_column that is not timestamptz is refused")
+    expect.text(_state(conn, f"SELECT pgcolumnar.create_rollup('q_g', 'feed', 'at', '1 hour', '{ORIGIN}',"
+                             f" '{{humidity}}', '{{count}}', '{{*}}')"),
+                "22023", "a group_by column the source does not have is refused")
+    expect.text(refused("q_f", "1 hour", "{sum}", "{at}"), "22023",
+                "a sum over a column that cannot be folded is refused")
+    expect.text(_state(conn, "SELECT pgcolumnar.rebase_rollup('feed')"), "42704",
+                "rebase_rollup of a table that is not a rollup is refused (42704)")
+    expect.num(_one(conn, "SELECT count(*) FROM pg_class WHERE relname IN ('q_m', 'q_p', 'q_l', 'q_c', 'q_s', 'q_t', 'q_g', 'q_f')"), 0,
                "and no refused rollup left a table behind")
