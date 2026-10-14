@@ -179,17 +179,14 @@ catalog_delete_index	catalog_delete_index	premise: the deep table grew the catal
 catalog_delete_index	catalog_delete_index	premise: the drop fixture grew the catalogs it is there to grow	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 catalogs hold only this file's tables	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 compaction kept every surviving row	15;16;17;18;19	never	-
-catalog_delete_index	catalog_delete_index	the phase 0 compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 reading covers every catalog the arms name	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 reading measured something	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A catalogs hold only this file's tables	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A compaction kept every surviving row	15;16;17;18;19	never	-
-catalog_delete_index	catalog_delete_index	the phase A compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A reading covers every catalog the arms name	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A reading measured something	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B catalogs hold only this file's tables	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B compaction kept every surviving row	15;16;17;18;19	never	-
-catalog_delete_index	catalog_delete_index	the phase B compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B reading covers every catalog the arms name	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B reading measured something	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the second session's catalog reads reach the shared statistics	15;16;17;18;19	never	-
@@ -205,6 +202,9 @@ catalog_delete_index	catalog_delete_index	premise: two vacuums of the same table
 catalog_delete_index	catalog_delete_index	row_group is larger than the threshold, so the two paths differ	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes
 catalog_delete_index	catalog_delete_index	the default's cost grows far less with the database than reading whole does	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	the drop's default does less catalog work than reading them whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes
+catalog_delete_index	catalog_delete_index	the phase 0 compaction retired the emptied groups	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	the phase A compaction retired the emptied groups	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	the phase B compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	the vacuum's default does less row_group work than reading it whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	with few catalog pages the drop's default does less work than probing every one	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes
 catalog_plan_index	catalog_plan_index	a no-qual count did not sequentially scan pgcolumnar.storage	15;16;17;18;19	2026-09-23	both storage_id scans reverted to InvalidOid, so the catalog is swept sequentially on its own primary key
@@ -1886,8 +1886,8 @@ native_fetch_coalesce	native_fetch_coalesce	premise: a point lookup uses the ind
 native_fetch_coalesce	native_fetch_coalesce	premise: fetching every projected column touched a measurable number of buffers	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	premise: fetching one projected column touched a measurable number of buffers	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	premise: the coalescing helper holds both the bound and the validity copy	15;16;17;18;19	never	-
-native_fetch_coalesce	native_fetch_coalesce	the wide fetch returns the projected values	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	the validity copy is bounded by the chunk length before it runs	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	the wide fetch returns the projected values	15;16;17;18;19	2026-10-14	every column of a coalesced fetch is copied from the start of the span (off = 0)
 native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	3-table join order matches filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table plan has coordinator	15;16;17;18;19	never	-
