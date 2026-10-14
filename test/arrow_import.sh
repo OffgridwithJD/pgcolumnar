@@ -114,15 +114,6 @@ fifo_release() { exec 9<>"$1" 2>/dev/null; exec 9>&- 2>/dev/null; }
 have_pyarrow=1
 python3 -c 'import pyarrow' 2>/dev/null || have_pyarrow=0
 
-expect_error() {
-	local label="$1" sql="$2"
-	if psql_run "$sql" >/dev/null 2>&1; then
-		check "$label (expected error)" "succeeded" "error"
-	else
-		check "$label" "error" "error"
-	fi
-}
-
 ARROW="$PGC_WORKDIR/rt.arrows"
 
 # --- 1. round trip through pgColumnar's own writer ---------------------------
@@ -332,10 +323,16 @@ fi
 
 # --- 4. error cases ---------------------------------------------------------
 echo "-- argument validation"
+# BY SQLSTATE (#1341). These accepted any error at all, and a check that failed
+# was recorded under a different name, "<label> (expected error)", so its red
+# never reached the name the ledger keeps. 42809 is wrong_object_type, 42804
+# datatype_mismatch; an empty state is a success.
 psql_run "CREATE TABLE ri_heap (a bigint, b float8, c text) USING heap;"
-expect_error "reject non-columnar target" "SELECT pgcolumnar.import_arrow('ri_heap', '$ARROW');"
+check "reject non-columnar target" \
+	"$(sqlstate_or_hang "SELECT pgcolumnar.import_arrow('ri_heap', '$ARROW')")" "42809"
 psql_run "CREATE TABLE ri_wrong (a int) USING pgcolumnar;"
-expect_error "reject column-count mismatch" "SELECT pgcolumnar.import_arrow('ri_wrong', '$ARROW');"
+check "reject column-count mismatch" \
+	"$(sqlstate_or_hang "SELECT pgcolumnar.import_arrow('ri_wrong', '$ARROW')")" "42804"
 
 if [ "$have_pyarrow" = 1 ]; then
 	DICTF="$PGC_WORKDIR/dict.arrows"
@@ -790,8 +787,8 @@ check "import into an indexed table: a point lookup finds its row" \
 psql_run "CREATE TABLE ix_uq (id int, v text) USING pgcolumnar;"
 psql_run "CREATE UNIQUE INDEX ix_uq_id ON ix_uq (id);"
 psql_run "SELECT pgcolumnar.import_arrow('ix_uq', '$IXFILE');"
-expect_error "importing the same keys twice raises unique_violation" \
-	"SELECT pgcolumnar.import_arrow('ix_uq', '$IXFILE');"
+check "importing the same keys twice raises unique_violation" \
+	"$(sqlstate_or_hang "SELECT pgcolumnar.import_arrow('ix_uq', '$IXFILE')")" "23505"
 check "the failed second import left the row count alone" \
 	"$(q 'SELECT count(*) FROM ix_uq;')" "3000"
 
