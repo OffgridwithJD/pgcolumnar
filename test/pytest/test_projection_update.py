@@ -68,12 +68,12 @@ def test_update_fans_the_new_row_number_out_to_projections(pgc_conn, expect):
         cur.execute("EXPLAIN (COSTS OFF) SELECT a, c FROM pu WHERE c BETWEEN 100 AND 200")
         plan = "\n".join(r[0] for r in cur.fetchall())
         expect.num(plan.count("Columnar Projection: pc"), 1,
-                   "premise: planner uses the covering projection")
+                   "planner uses the covering projection")
 
         q_c = "SELECT a, c FROM pu WHERE c BETWEEN 100 AND 200"
         q_h = "SELECT a, c FROM pu_h WHERE c BETWEEN 100 AND 200"
         expect.rows(_set(cur, q_c), _set(cur, q_h),
-                    "premise: projection matches the heap before any update")
+                    "projection matches the heap before any update")
 
         # --- updating a PROJECTED column ------------------------------------
         cur.execute("UPDATE pu   SET a = a + 1 WHERE a % 10 = 0")
