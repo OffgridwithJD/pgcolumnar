@@ -1188,6 +1188,7 @@ CREATE TABLE pgcolumnar.rollup (
 	partials regclass NOT NULL,        -- the table behind it
 	source regclass NOT NULL,
 	source_storage bigint NOT NULL,    -- the source's storage id when recorded
+	source_oid oid NOT NULL,           -- and its OID: a dump writes it as a number (#1377)
 	ts_column name NOT NULL,
 	width interval NOT NULL,
 	origin timestamptz NOT NULL,
@@ -1221,6 +1222,16 @@ CREATE POLICY rollup_group_owner ON pgcolumnar.rollup_group
 	USING (pg_has_role(current_user,
 					   (SELECT c.relowner FROM pg_class c WHERE c.oid = rollup), 'USAGE'));
 GRANT SELECT, INSERT, UPDATE, DELETE ON pgcolumnar.rollup, pgcolumnar.rollup_group TO PUBLIC;
+/*
+ * A rollup's definition is dumped (#1377); the row groups it folded are not, as
+ * they name storage a restore replaces. Every column holds a regclass or names,
+ * which a restore resolves, except source_oid: written as the old number, it no
+ * longer matches the restored source, and refresh_rollup refuses until
+ * rebase_rollup records the groups again. The storage id cannot tell them apart:
+ * storageid_seq restarts with the extension, so a restored source can get the
+ * one recorded, and refresh would fold its rows into the restored partials twice.
+ */
+SELECT pg_catalog.pg_extension_config_dump('pgcolumnar.rollup', '');
 
 -- The view depends on its source, and the partials on the view, recorded by this
 -- trigger whenever a rollup row is written, a restore included (#1376, #1377).
@@ -1398,7 +1409,7 @@ BEGIN
 	view_oid := format('%I.%I', nsp, rollup)::regclass;
 	INSERT INTO pgcolumnar.rollup VALUES
 		(view_oid, format('%I.%I', nsp, partials)::regclass, source,
-		 pgcolumnar.get_storage_id(source), ts_column, width, origin,
+		 pgcolumnar.get_storage_id(source), source::oid, ts_column, width, origin,
 		 coalesce(group_by, '{}'), agg_functions, agg_columns);
 	RETURN view_oid;
 END
@@ -1450,6 +1461,12 @@ BEGIN
 	-- Self-conflicting, so two refreshes run one after the other; readers pass.
 	EXECUTE format('LOCK TABLE %s IN SHARE UPDATE EXCLUSIVE MODE', r.partials);
 
+	IF r.source::oid <> r.source_oid THEN
+		RAISE EXCEPTION 'the source of rollup % is not the table its row groups were recorded from', rollup
+			USING ERRCODE = 'object_not_in_prerequisite_state',
+				  DETAIL = 'The rollup was restored from a dump, which does not carry the row groups it folded.',
+				  HINT = 'If the rollup is current, pgcolumnar.rebase_rollup records the source''s row groups.';
+	END IF;
 	IF pgcolumnar.get_storage_id(r.source) <> r.source_storage THEN
 		RAISE EXCEPTION 'the source of rollup % was rewritten since its last refresh', rollup
 			USING ERRCODE = 'object_not_in_prerequisite_state',
@@ -1694,7 +1711,8 @@ BEGIN
 					  AND ctid <= pgcolumnar.row_tid(s.first_row_number + s.row_count - 1)) x
 		$f$, r.source, r.rollup, r.ts_column);
 	GET DIAGNOSTICS n = ROW_COUNT;
-	UPDATE pgcolumnar.rollup x SET source_storage = pgcolumnar.get_storage_id(r.source)
+	UPDATE pgcolumnar.rollup x SET source_storage = pgcolumnar.get_storage_id(r.source),
+								  source_oid = r.source::oid
 	 WHERE x.rollup = r.rollup;
 	RETURN n;
 END
