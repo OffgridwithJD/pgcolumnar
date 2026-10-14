@@ -2002,4 +2002,18 @@ suites_not_covered 242
 #     never         1925 + 8 - 3 = 1930
 #     dated          580 + 3     =  583
 #     1930 + 583 == 2513
-checks_never_observed_red 1930
+#
+# #1341, arrow_import's pytest twin, and its argument arms by SQLSTATE (OffgridwithJD):
+# 1930 -> 1928. No new rows. "reject non-columnar target" and "reject column-count
+# mismatch" accepted any error, and a failure was recorded as "<name> (expected
+# error)", so a red never reached the row. They now assert 42809 and 42804, and each is
+# dated by its check removed: without the relation check the import fails 42804
+# instead, which main's suite accepts; without the count check a 16-column file
+# imports into a 1-column table, which main's suite reports under the other name.
+# Five-major runs: 77/77 on 15-19, the twin 6 passed with pyarrow required.
+#
+#     ledger rows   2513     = 2513
+#     never         1930 - 2     = 1928
+#     dated          583 + 2     = 585
+#     1928 + 585 == 2513
+checks_never_observed_red 1928

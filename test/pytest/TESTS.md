@@ -153,6 +153,7 @@ behaviour, the source of that number is named.
 - [105. test_import_export_privilege.py: import and export check the table's privilege, serial and parallel](#105-test_import_export_privilegepy-import-and-export-check-the-tables-privilege-serial-and-parallel)
 - [106. test_every_suite_job_installs_the_extensions.py: every job that runs the suites installs the extension packages](#106-test_every_suite_job_installs_the_extensionspy-every-job-that-runs-the-suites-installs-the-extension-packages)
 - [107. test_fdw_plan_privilege.py: planning a foreign table reads no server file for a role the scan would refuse](#107-test_fdw_plan_privilegepy-planning-a-foreign-table-reads-no-server-file-for-a-role-the-scan-would-refuse)
+- [108. test_arrow_import.py: import_arrow round trips, reads a foreign file, and refuses what it cannot decode](#108-test_arrow_importpy-import_arrow-round-trips-reads-a-foreign-file-and-refuses-what-it-cannot-decode)
 
 ## 1. How to read a test in here
 
@@ -6859,3 +6860,18 @@ The pytest twin of `test/fdw_plan_privilege.sh`. A planner estimate is visible t
 | test | what it holds |
 | --- | --- |
 | `test_fdw_planning_reads_no_server_file_for_an_unprivileged_role` | a role without `pg_read_server_files` gets the flat estimate from both wrappers and plans a missing Iceberg path the same as a real one, while the scan still refuses it (42501); a privileged role gets the manifest count and the size estimate (controls) |
+
+## 108. test_arrow_import.py: import_arrow round trips, reads a foreign file, and refuses what it cannot decode
+
+The pytest twin of `test/arrow_import.sh` (ported for #1341), every check by the shell's name. A 16-column table survives export and import exactly (a set hash on both sides), non-finite dates and NaN numerics arrive as null, and a non-columnar target and a column-count mismatch are refused by SQLSTATE. A pyarrow-written file imports with its values; nanosecond values are floored to the microsecond and the loss is reported once, counted in VALUES (two columns, so values and rows differ), never refused; a dictionary batch and a compressed body are refused by SQLSTATE and message; every Arrow date, time and timestamp carrier and unit decodes to the instant it holds or is refused 22008, a file whose declared type does not match its column is refused 42804, and nested units are honoured. An import maintains plain, unique (23505 on a second import) and partial indexes, and a FIFO is refused rather than hung. The four pyarrow tests decline by name without pyarrow, and fail where `PGC_REQUIRE` names it.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_round_trip_and_the_documented_lossy_mapping` | export and import counts, the identical round trip, the non-finite mapping, and the two argument refusals |
+| `test_a_file_pyarrow_wrote` | a foreign file's row count and values |
+| `test_nanosecond_narrowing_is_reported_never_refused` | every row kept, the loss counted in values (8, then 12 through time64 and a list), no report on the two controls, and the floor |
+| `test_the_refusals_and_every_temporal_carrier` | the dictionary and compressed refusals, every carrier and unit, the 22008 guards, the 42804 type matches with their controls, an empty target after a refusal, and nested units |
+| `test_an_import_maintains_the_tables_indexes` | the plan really uses the index, index and sequential scans agree, the unique violation and its row count, and the partial index |
+| `test_a_fifo_is_refused_not_a_hang` | XX001 within the wall clock, and the backend still up |

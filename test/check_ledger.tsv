@@ -119,9 +119,9 @@ arrow_import	arrow_import	premise: this pyarrow writes a compressed body (zstd o
 arrow_import	arrow_import	pyarrow import rows	15;16;17;18;19	never	-
 arrow_import	arrow_import	pyarrow values	15;16;17;18;19	never	-
 arrow_import	arrow_import	reject a compressed record-batch body	15;16;17;18;19	2026-10-14	import_arrow without its compressed-body refusal
-arrow_import	arrow_import	reject column-count mismatch	15;16;17;18;19	never	-
+arrow_import	arrow_import	reject column-count mismatch	15;16;17;18;19	2026-10-14	import_arrow without its column-count check
 arrow_import	arrow_import	reject dictionary-encoded file	15;16;17;18;19	2026-10-14	import_arrow without its dictionary-batch refusal
-arrow_import	arrow_import	reject non-columnar target	15;16;17;18;19	never	-
+arrow_import	arrow_import	reject non-columnar target	15;16;17;18;19	2026-10-14	import_arrow without its columnar-relation check
 arrow_import	arrow_import	round trip identical	15;16;17;18;19	never	-
 arrow_import	arrow_import	so does a microsecond-exact nanosecond file	15;16;17;18;19	never	-
 arrow_import	arrow_import	the failed second import left the row count alone	15;16;17;18;19	never	-
