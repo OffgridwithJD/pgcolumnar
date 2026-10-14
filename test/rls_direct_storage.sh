@@ -96,7 +96,8 @@ verdict() {  # verdict <sql> -> rls | acl | allowed | other
 # Two of these read the table through the columnar scan, so a product change can
 # redden them, and they are checks, not premises (#1236; #1397 review): the policy's
 # row count, which the custom scan dropping its quals turned into every row, and the
-# owner's count.
+# owner's count. The source files are a third: the owner's export writes them, so an
+# export that writes nothing reddens that check (#1383 review).
 check "premise: the role can open a session" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_rls -d "$PGC_DB" -At -c 'SELECT 1;' 2>&1 | head -1)" "1"
 check "premise: the role HOLDS select, so the ACL check cannot be what refuses" \
@@ -110,7 +111,7 @@ check "premise: the role holds EXECUTE, so the grant layer is not what refuses" 
 		-c "SELECT has_function_privilege('pgcolumnar.read_projection(regclass,text)','EXECUTE');" 2>&1 | head -1)" "t"
 check_num "the owner sees every row, so the policy hides something real" \
 	"$(q 'SELECT count(*) FROM rls_t;')" "$ROWS"
-check "premise: the source files the import arms need exist" \
+check "the source files the import arms need exist" \
 	"$([ -s "$OUT/src.parquet" ] && [ -s "$OUT/src.arrow" ] && [ -s "$OUT/src.txt" ] && echo yes || echo no)" "yes"
 
 # ---- the refusals -----------------------------------------------------------

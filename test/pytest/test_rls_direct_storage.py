@@ -108,8 +108,9 @@ def test_the_direct_storage_paths_refuse_a_policy_restricted_caller(pgc_conn, pg
                 "True", "premise: the role holds EXECUTE, so the grant layer is not what refuses")
     expect.num(_one(conn, "SELECT count(*) FROM rls_t"), ROWS,
                "the owner sees every row, so the policy hides something real")
-    expect.text("yes" if all(os.path.getsize(f"{out}/{f}") > 0 for f in ("src.parquet", "src.arrow", "src.txt"))
-                else "no", "yes", "premise: the source files the import arms need exist")
+    expect.text("yes" if all(os.path.exists(f"{out}/{f}") and os.path.getsize(f"{out}/{f}") > 0
+                                for f in ("src.parquet", "src.arrow", "src.txt"))
+                else "no", "yes", "the source files the import arms need exist")
 
     # ---- the refusals: on unfixed code each returns "allowed", which is the leak
     def v(sql):
@@ -165,10 +166,15 @@ def test_the_direct_storage_paths_refuse_a_policy_restricted_caller(pgc_conn, pg
         _one(conn, f"SELECT pgcolumnar.export_parquet('rls_t','{out}/owner.parquet')")
     except psycopg.Error:
         pass
-    exported = 0  # no file holds no rows: a refused export is a red arm, not a crash
-    if os.path.exists(f"{out}/owner.parquet"):
-        exported = _one(conn, f"SELECT count(*) FROM pgcolumnar.read_parquet('{out}/owner.parquet') AS (id int,"
-                              " owner_name text, ssn text)")
+    # No file, an empty one, or one that does not read holds no rows: a refused or
+    # empty export is a red arm by name, not a crash (#1383 review).
+    exported = 0
+    if os.path.exists(f"{out}/owner.parquet") and os.path.getsize(f"{out}/owner.parquet") > 0:
+        try:
+            exported = _one(conn, f"SELECT count(*) FROM pgcolumnar.read_parquet('{out}/owner.parquet') AS (id int,"
+                                  " owner_name text, ssn text)")
+        except psycopg.Error:
+            exported = 0
     expect.num(exported, owner_rows, "and the owner can still export it")
 
     # ---- FORCE ROW LEVEL SECURITY reaches a NON-superuser owner too
