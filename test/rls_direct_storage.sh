@@ -58,16 +58,18 @@ psql_run "GRANT SELECT, INSERT ON plain_t TO t_rls;"
 # the RLS check, so they would report acl and prove nothing about this fix.
 psql_run "GRANT EXECUTE ON FUNCTION pgcolumnar.read_projection(regclass,text) TO t_rls;"
 psql_run "GRANT EXECUTE ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass,text) TO t_rls;"
-psql_run "ALTER TABLE rls_t ENABLE ROW LEVEL SECURITY;"
-psql_run "CREATE POLICY p_own ON rls_t FOR SELECT TO t_rls USING (owner_name = current_user);"
-psql_run "CREATE POLICY p_ins ON rls_t FOR INSERT TO t_rls WITH CHECK (owner_name = current_user);"
-# A source file the role may import, produced by the owner from the open table.
+# A source file the role may import, produced by the owner from the open table,
+# BEFORE row-level security is enabled, so no version of the guard under test can
+# stop the fixture from being made.
 # Exported from rls_t BY THE OWNER, so the source shape matches the import
 # target. A source taken from a differently shaped table makes the import arms
 # fail on column counts, which looks like a refusal and is not one.
 psql_run "SELECT pgcolumnar.export_parquet('rls_t','$OUT/src.parquet');"
 psql_run "SELECT pgcolumnar.export_arrow('rls_t','$OUT/src.arrow');"
 psql_run "COPY rls_t TO '$OUT/src.txt';"
+psql_run "ALTER TABLE rls_t ENABLE ROW LEVEL SECURITY;"
+psql_run "CREATE POLICY p_own ON rls_t FOR SELECT TO t_rls USING (owner_name = current_user);"
+psql_run "CREATE POLICY p_ins ON rls_t FOR INSERT TO t_rls WITH CHECK (owner_name = current_user);"
 
 as_rls() {  # as_rls <sql> -> the ERROR line, connfail, or noerror
 	local out
@@ -170,7 +172,7 @@ check "the OWNER can still read the RLS table's storage (RLS_NONE_ENV)" \
 # here echoed "ran", so a refused owner export passed it.
 q "SELECT pgcolumnar.export_parquet('rls_t','$OUT/owner.parquet');" >/dev/null 2>&1
 check_num "and the owner can still export it" \
-	"$([ -s "$OUT/owner.parquet" ] && q "SELECT count(*) FROM pgcolumnar.read_parquet('$OUT/owner.parquet') AS (id int, owner_name text, ssn text);" 2>&1 | head -1 || echo absent)" "$owner_rows"
+	"$([ -s "$OUT/owner.parquet" ] && q "SELECT count(*) FROM pgcolumnar.read_parquet('$OUT/owner.parquet') AS (id int, owner_name text, ssn text);" 2>&1 | head -1 || echo 0)" "$owner_rows"
 
 # ---- FORCE ROW LEVEL SECURITY reaches the owner too -------------------------
 #

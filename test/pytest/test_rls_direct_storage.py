@@ -85,14 +85,15 @@ def test_the_direct_storage_paths_refuse_a_policy_restricted_caller(pgc_conn, pg
         for r in (RLS, NONE, OWNER):
             cur.execute(f"GRANT EXECUTE ON FUNCTION pgcolumnar.read_projection(regclass,text) TO {r}")
         cur.execute(f"GRANT EXECUTE ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass,text) TO {RLS}")
-        cur.execute("ALTER TABLE rls_t ENABLE ROW LEVEL SECURITY")
-        cur.execute(f"CREATE POLICY p_own ON rls_t FOR SELECT TO {RLS} USING (owner_name = current_user)")
-        cur.execute(f"CREATE POLICY p_ins ON rls_t FOR INSERT TO {RLS} WITH CHECK (owner_name = current_user)")
         # Sources exported from rls_t BY THE OWNER, so their shape matches the import
         # target: a differently shaped source fails on column counts, not on RLS.
+        # BEFORE RLS is enabled, so no version of the guard under test can stop them.
         cur.execute(f"SELECT pgcolumnar.export_parquet('rls_t','{out}/src.parquet')")
         cur.execute(f"SELECT pgcolumnar.export_arrow('rls_t','{out}/src.arrow')")
         cur.execute(f"COPY rls_t TO '{out}/src.txt'")
+        cur.execute("ALTER TABLE rls_t ENABLE ROW LEVEL SECURITY")
+        cur.execute(f"CREATE POLICY p_own ON rls_t FOR SELECT TO {RLS} USING (owner_name = current_user)")
+        cur.execute(f"CREATE POLICY p_ins ON rls_t FOR INSERT TO {RLS} WITH CHECK (owner_name = current_user)")
 
     def as_rls(sql):
         return _login(pgc_cluster, RLS, schema, sql)
@@ -154,14 +155,17 @@ def test_the_direct_storage_paths_refuse_a_policy_restricted_caller(pgc_conn, pg
                 "and still exportable by it")
     # Against the LIVE count: on unfixed code the import arms leak rows into rls_t.
     owner_rows = _one(conn, "SELECT count(*) FROM rls_t")
-    expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.read_projection('rls_t','p1')"), owner_rows,
-               "the OWNER can still read the RLS table's storage (RLS_NONE_ENV)")
     import psycopg
+    try:
+        owner_read = _one(conn, "SELECT count(*) FROM pgcolumnar.read_projection('rls_t','p1')")
+    except psycopg.Error:
+        owner_read = -1  # refused: a red arm by name, not a crash
+    expect.num(owner_read, owner_rows, "the OWNER can still read the RLS table's storage (RLS_NONE_ENV)")
     try:
         _one(conn, f"SELECT pgcolumnar.export_parquet('rls_t','{out}/owner.parquet')")
     except psycopg.Error:
         pass
-    exported = -1  # no file: a refused export is a red arm, not a crash
+    exported = 0  # no file holds no rows: a refused export is a red arm, not a crash
     if os.path.exists(f"{out}/owner.parquet"):
         exported = _one(conn, f"SELECT count(*) FROM pgcolumnar.read_parquet('{out}/owner.parquet') AS (id int,"
                               " owner_name text, ssn text)")
