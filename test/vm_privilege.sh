@@ -238,10 +238,17 @@ check "the heap index-only scan still returns only live rows after the sweep (#7
 check "and it still agrees with the sequential scan (#748)" \
 	"$(ios_count)" "$(seq_count)"
 
+# ran_ok ROLE SQL -> "ok" only when psql ran SQL as ROLE and exited 0, "failed" otherwise.
+# Positive evidence (#1381, #1400 review): counting ERROR lines, or reading an empty
+# SQLSTATE as success, also passes a session that never connected.
+ran_ok() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" -d "$PGC_DB" \
+		-X -qtA -v ON_ERROR_STOP=1 -c "$2" >/dev/null 2>&1 && echo ok || echo failed
+}
 # And the positive control, because a guard that refused everything would satisfy
 # both arms above: the same call on the columnar victim is accepted.
 check "the same call on a columnar relation is still accepted (#748 control)" \
-	"$(sqlstate_of "pgcolumnar.vm_is_visible('vmvictim'::regclass, 0)")" ""
+	"$(ran_ok postgres "SELECT pgcolumnar.vm_is_visible('vmvictim'::regclass, 0)")" "ok"
 
 # ---- coverage ------------------------------------------------------------------
 # A future vm_* entry point that forgets the gate should turn this red rather than

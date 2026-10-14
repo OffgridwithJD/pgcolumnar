@@ -149,16 +149,23 @@ check "premise: the lock is still held after the last probe" \
 as_super -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%vlp_holder%' AND pid <> pg_backend_pid();" >/dev/null 2>&1
 wait "$holder_pid" 2>/dev/null || true
 
+# ran_ok ROLE SQL -> "ok" only when psql ran SQL as ROLE and exited 0, "failed" otherwise.
+# Positive evidence (#1381, #1400 review): counting ERROR lines, or reading an empty
+# SQLSTATE as success, also passes a session that never connected.
+ran_ok() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" -d "$PGC_DB" \
+		-X -qtA -v ON_ERROR_STOP=1 -c "$2" >/dev/null 2>&1 && echo ok || echo failed
+}
 # ---- allow arm: the owner is not broken (uncontended) -----------------------
 check "the owner can still vacuum the table" \
-	"$(as_super -c "SELECT pgcolumnar.vacuum('victim'::regclass);" | grep -c 'ERROR')" "0"
+	"$(ran_ok postgres "SELECT pgcolumnar.vacuum('victim'::regclass);")" "ok"
 
 # The positive controls for the #749 arms. Without these, a guard that refused
 # every caller would satisfy every deny arm above.
 check "the owner can still compact the table (#749 control)" \
-	"$(as_super -c "SELECT pgcolumnar.compact('victim'::regclass);" | grep -c 'ERROR')" "0"
+	"$(ran_ok postgres "SELECT pgcolumnar.compact('victim'::regclass);")" "ok"
 check "the owner can still add and drop a projection (#749 control)" \
-	"$(as_super -c "SELECT pgcolumnar.add_projection('victim'::regclass, 'p1', ARRAY['id']);" \
-	           -c "SELECT pgcolumnar.drop_projection('victim'::regclass, 'p1');" | grep -c 'ERROR')" "0"
+	"$(ran_ok postgres "SELECT pgcolumnar.add_projection('victim'::regclass, 'p1', ARRAY['id']);
+	                     SELECT pgcolumnar.drop_projection('victim'::regclass, 'p1');")" "ok"
 
 pgc_summary
