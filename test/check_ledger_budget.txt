@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 246
+suites_not_covered 245
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -1885,4 +1885,20 @@ suites_not_covered 246
 #     never         1797 + 4 = 1801
 #     dated          557 + 3 =  560
 #     1801 + 560 == 2361
-checks_never_observed_red 1801
+#
+# #1341, import_export_privilege seeded, with the parallel twins' arms (OffgridwithJD):
+# 1801 -> 1821, and suites_not_covered 246 -> 245. The suite had no rows. It enters
+# with all 24 checks from five-major runs (24/24 on each of 15-19). Four are dated:
+# parallel_copy's deny arm, and victim's row count beside it, by parallel_copy
+# without its INSERT check (the attacker's 50 rows landed); parallel_export_parquet's
+# deny arm, and "nor by the parallel export", by the export without its SELECT check
+# (the file was written). The other 20 arrive never: eight premises, the five serial
+# deny arms and their file check, which this change did not re-mutate, and six owner
+# controls. A census, not a ceiling: seeding a suite moves it up by the seed's undated
+# rows, and the coverage ceiling down by one.
+#
+#     ledger rows   2361 + 24 = 2385
+#     never         1801 + 20 = 1821
+#     dated          560 +  4 =  564
+#     1821 + 564 == 2385
+checks_never_observed_red 1821
