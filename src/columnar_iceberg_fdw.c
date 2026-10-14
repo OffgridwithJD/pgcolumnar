@@ -299,6 +299,21 @@ icefdwGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 	 * restriction clauses (baserestrictinfo is populated by now), so a filtered
 	 * scan estimates its filtered rows rather than the whole table.
 	 */
+	/*
+	 * ONLY FOR A ROLE THE SCAN WOULD ADMIT. The executor refuses a caller without
+	 * pg_read_server_files at icefdwBeginForeignScan, but planning ran first and
+	 * read the metadata for anyone: EXPLAIN then told such a role how many rows a
+	 * server-side table holds, and a metadata_path that did not exist failed
+	 * planning with 58P01, so planning probed whether a server path exists. The
+	 * Parquet wrapper has gated its planner the same way since #330. Others get
+	 * the flat estimate and learn nothing from the plan.
+	 */
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+	{
+		baserel->tuples = 1000.0;
+		set_baserel_size_estimates(root, baserel);
+		return;
+	}
 	if (mdpath != NULL)
 		est = PgColumnarIcebergEstimateRows(mdpath);
 	baserel->tuples = (est > 0) ? (double) est : 1.0;

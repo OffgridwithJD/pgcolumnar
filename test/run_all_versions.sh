@@ -89,6 +89,7 @@ SUITES=(
 	entry_point_privilege
 	estimate_deleted
 	export_sink
+	fdw_plan_privilege
 	fk_referencing
 	fsst_margin
 	fsst_verdict_cache

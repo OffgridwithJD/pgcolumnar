@@ -551,6 +551,14 @@ encode_post_codec	encode_post_codec	the tail column holds no row the heap does n
 encode_post_codec	encode_post_codec	the tail column preserves its checksum	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
 encode_post_codec	encode_post_codec	the tail column reads back exactly what the heap holds	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
 encode_post_codec	encode_post_codec	while a column where encoding genuinely wins still encodes	15;16;17;18;19	never	-
+fdw_plan_privilege	fdw_plan_privilege	a privileged planner estimates the Iceberg table from its manifests	15;16;17;18;19	never	-
+fdw_plan_privilege	fdw_plan_privilege	a privileged planner estimates the Parquet table from the file's size	15;16;17;18;19	never	-
+fdw_plan_privilege	fdw_plan_privilege	an unprivileged planner gets the flat Parquet estimate	15;16;17;18;19	2026-10-14	the Parquet planner stats the file for any role (no pg_read_server_files gate)
+fdw_plan_privilege	fdw_plan_privilege	an unprivileged planner gets the flat estimate, not the Iceberg table's row count	15;16;17;18;19	2026-10-14	the Iceberg planner reads metadata_path for any role, as before this fix
+fdw_plan_privilege	fdw_plan_privilege	and a metadata_path that does not exist plans the same, so planning probes nothing	15;16;17;18;19	2026-10-14	the Iceberg planner reads metadata_path for any role, as before this fix
+fdw_plan_privilege	fdw_plan_privilege	premise: the Parquet file was written	15;16;17;18;19	never	-
+fdw_plan_privilege	fdw_plan_privilege	premise: the reader is not a member of pg_read_server_files	15;16;17;18;19	never	-
+fdw_plan_privilege	fdw_plan_privilege	the unprivileged Iceberg scan is still refused (42501)	15;16;17;18;19	never	-
 harness_selftest	030-assertions	nothing leaked into the squatter	15;16;17;18;19	never	-
 harness_selftest	030-assertions	pgc_port_free says the squatter's port is busy	15;16;17;18;19	never	-
 harness_selftest	030-assertions	squatter survived untouched	15;16;17;18;19	never	-
