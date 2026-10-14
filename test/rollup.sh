@@ -645,7 +645,7 @@ if [ -n "$CT_COLL" ]; then
 		"$(q "SELECT min_sc || '|' || max_sc || '|' || min_su || '|' || max_su FROM r_ct;")" \
 		"$(q "SELECT min(sc) || '|' || max(sc) || '|' || min(su) || '|' || max(su) FROM ct;")"
 	check "premise: the two collations disagree on these rows, so the arm can tell them apart" \
-		"$(q "SELECT (min(sc) <> min(su))::text FROM ct;")" "true"
+		"$(q "SELECT (min(sc) COLLATE \"C\" <> min(su) COLLATE \"C\")::text FROM ct;")" "true"
 else
 	for _n in "premise: the second refresh folds new rows into the existing bucket" \
 			"min and max over a C column and an en_US column keep each column's own order across a refresh" \

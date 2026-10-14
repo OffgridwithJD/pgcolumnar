@@ -811,7 +811,9 @@ def test_min_and_max_keep_each_columns_collation(pgc_own_db, expect):
     expect.text(_one(conn, "SELECT min_sc || '|' || max_sc || '|' || min_su || '|' || max_su FROM r_ct"),
                 _one(conn, "SELECT min(sc) || '|' || max(sc) || '|' || min(su) || '|' || max(su) FROM ct"),
                 "min and max over a C column and an en_US column keep each column's own order across a refresh")
-    expect.text(str(_one(conn, "SELECT min(sc) <> min(su) FROM ct")), "True",
+    # Both sides in "C": the two columns' collations differ, so a bare comparison
+    # has no collation to use. Equality does not depend on which one is chosen.
+    expect.text(str(_one(conn, 'SELECT min(sc) COLLATE "C" <> min(su) COLLATE "C" FROM ct')), "True",
                 "premise: the two collations disagree on these rows, so the arm can tell them apart")
 
 
