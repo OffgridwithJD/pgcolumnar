@@ -210,6 +210,22 @@ check_num "no-leak: EXPLAIN VERBOSE carries no secret" \
 check_num "no-leak: srvoptions carry no secret (by construction)" \
 	"$(q "SELECT count(*) FROM pg_foreign_server WHERE srvoptions::text LIKE '%$SECRET%'")" "0"
 
+# ---- a PUBLIC mapping (#1341) ----------------------------------------------
+# sql-reference.md: a read resolves the scanning user's own mapping first, then a
+# PUBLIC one. Frank has no mapping of his own; bob's own carries the wrong secret, so
+# a PUBLIC mapping holding the right one must not rescue him. Dropped again before
+# phase 2, where a PUBLIC mapping would answer for the ambient arms.
+psql_run "CREATE ROLE cred_frank LOGIN; GRANT pg_read_server_files TO cred_frank;
+          GRANT USAGE ON FOREIGN SERVER csrv TO cred_frank; GRANT SELECT ON fs3 TO cred_frank;"
+psql_run "CREATE USER MAPPING FOR PUBLIC SERVER csrv
+          OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET');"
+# A refused read counts no rows, so a refusal is a measurement and not an empty capture.
+check_num "a role with no mapping of its own reads through the PUBLIC mapping" \
+	"$(c="$(q_as cred_frank "SELECT count(*) FROM fs3")"; echo "${c:-0}")" "$((G * ROWS_PER_GROUP))"
+check "a role's own mapping is used before the PUBLIC one (bob's wrong secret is still refused 28000)" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_bob)" "28000"
+psql_run "DROP USER MAPPING FOR PUBLIC SERVER csrv;"
+
 # ---- phase 2: environment present; ambient is still a privilege -------------
 pg_restart_env "AWS_ENDPOINT_URL='http://127.0.0.1:$S3_PORT'" \
 	"AWS_ACCESS_KEY_ID='$AKID'" "AWS_SECRET_ACCESS_KEY='$SECRET'" \

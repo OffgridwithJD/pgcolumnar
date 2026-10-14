@@ -300,6 +300,18 @@ def test_object_store_credentials(pgc_cluster, expect):
         expect.num(count(f"SELECT count(*) FROM pg_foreign_server WHERE srvoptions::text LIKE '%{SECRET}%'"), 0,
                    "no-leak: srvoptions carry no secret (by construction)")
 
+        # ---- a PUBLIC mapping (#1341): the user's own mapping first, then PUBLIC. Frank
+        # has none of his own; bob's own carries the wrong secret, which a PUBLIC mapping
+        # holding the right one must not override. Dropped before phase 2.
+        run("CREATE ROLE cred_frank LOGIN", "GRANT pg_read_server_files TO cred_frank",
+            "GRANT USAGE ON FOREIGN SERVER csrv TO cred_frank", "GRANT SELECT ON fs3 TO cred_frank",
+            f"CREATE USER MAPPING FOR PUBLIC SERVER csrv OPTIONS (access_key_id '{AKID}', secret_access_key '{SECRET}')")
+        expect.num(count("SELECT count(*) FROM fs3", "cred_frank"), n,
+                   "a role with no mapping of its own reads through the PUBLIC mapping")
+        expect.text(sql("SELECT count(*) FROM fs3", "cred_bob")[0], "28000",
+                    "a role's own mapping is used before the PUBLIC one (bob's wrong secret is still refused 28000)")
+        run("DROP USER MAPPING FOR PUBLIC SERVER csrv")
+
         # ---- phase 2: the environment is present, and ambient is still a privilege
         _pg_ctl(cluster, ["-D", str(datadir), "-m", "fast", "-w", "stop"], {})
         started = _pg_ctl(cluster, ["-D", str(datadir), "-l", log, "-w", "start"],
