@@ -239,3 +239,44 @@ def test_a_duplicate_key_is_still_rejected(pgc_conn, expect):
         got = ("rejected" if "duplicate key" in msg or "unique constraint" in msg
                else f"NOT rejected: {str(exc).splitlines()[0]}")
     expect.text(got, "rejected", "a duplicate key is still rejected")
+
+
+def test_the_row_identity_lock_and_its_settings(pgc_cluster, pgc_conn, expect):
+    """An UPDATE serialises on its row through an advisory lock in class 104; the
+    session setting enable_row_update_lock turns that off, and row_lock_buckets is
+    part of the lock tag, so it is fixed at server start (#1341)."""
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE rl (id int, v int) USING pgcolumnar")
+        cur.execute("INSERT INTO rl SELECT g, g FROM generate_series(1, 100) g")
+        cur.execute("SELECT current_schema()")
+        schema = cur.fetchone()[0]
+
+    def row_locks_while_updating(setting):
+        holder = psycopg.connect(pgc_cluster.dsn(), autocommit=False)
+        try:
+            with holder.cursor() as hc:
+                hc.execute(f'SET search_path TO "{schema}"')
+                hc.execute(f"SET LOCAL pgcolumnar.enable_row_update_lock = {setting}")
+                hc.execute("UPDATE rl SET v = v + 1 WHERE id = 7")
+            with pgc_conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+                            " AND objsubid = 104 AND pid <> pg_backend_pid()")
+                return cur.fetchone()[0]
+        finally:
+            holder.rollback()
+            holder.close()
+
+    on = row_locks_while_updating("on")
+    expect.text("held" if on >= 1 else "none", "held",
+                "an UPDATE holds a row-identity lock (class 104) while enable_row_update_lock is on")
+    expect.num(row_locks_while_updating("off"), 0, "and holds none with enable_row_update_lock off")
+    with pgc_conn.cursor() as cur:
+        try:
+            cur.execute("SET pgcolumnar.row_lock_buckets = 7")
+            refused = "ok"
+        except psycopg.Error as e:
+            refused = e.sqlstate
+        cur.execute("SELECT context || '|' || setting FROM pg_settings WHERE name = 'pgcolumnar.row_lock_buckets'")
+        ctx = cur.fetchone()[0]
+    expect.text(f"{refused}|{ctx}", "55P02|postmaster|1024",
+                "row_lock_buckets is fixed at server start, so a session cannot change it (55P02)")

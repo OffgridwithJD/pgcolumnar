@@ -204,4 +204,29 @@ check "a duplicate key is still rejected" \
 	"$(grep -qiE 'duplicate key|unique constraint' <<<"$dup" && echo rejected || echo "NOT rejected: $(head -1 <<<"$dup")")" \
 	"rejected"
 
+# ---- the row-identity lock (class 104) and its two settings (#1341) ----------------
+#
+# An UPDATE or DELETE serialises on the row it changes through an advisory lock in
+# class 104 (PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY). pgcolumnar.enable_row_update_lock
+# turns that off for a session; pgcolumnar.row_lock_buckets is part of the lock tag,
+# so it is fixed at server start. Neither was set or read by any test.
+psql_run "CREATE TABLE rl (id int, v int) USING pgcolumnar;"
+psql_run "INSERT INTO rl SELECT g, g FROM generate_series(1, 100) g;"
+# row_locks_while_updating SETTING -> class-104 locks another session holds mid-UPDATE
+row_locks_while_updating() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+		-c "BEGIN; SET LOCAL pgcolumnar.enable_row_update_lock = $1; UPDATE rl SET v = v + 1 WHERE id = 7; SELECT pg_sleep(3); COMMIT;" \
+		>/dev/null 2>&1 &
+	local holder=$!
+	sleep 1
+	q "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 104 AND pid <> pg_backend_pid()"
+	wait "$holder"
+}
+check "an UPDATE holds a row-identity lock (class 104) while enable_row_update_lock is on" \
+	"$([ "$(row_locks_while_updating on)" -ge 1 ] && echo held || echo none)" "held"
+check "and holds none with enable_row_update_lock off" "$(row_locks_while_updating off)" "0"
+check "row_lock_buckets is fixed at server start, so a session cannot change it (55P02)" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -v VERBOSITY=sqlstate -c "SET pgcolumnar.row_lock_buckets = 7;" 2>&1 | sed -n 's/^.*ERROR:[[:space:]]*\([0-9A-Z]\{5\}\).*$/\1/p')|$(q "SELECT context || '|' || setting FROM pg_settings WHERE name = 'pgcolumnar.row_lock_buckets'")" \
+	"55P02|postmaster|1024"
+
 pgc_summary
