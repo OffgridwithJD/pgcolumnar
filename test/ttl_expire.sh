@@ -331,8 +331,6 @@ check "and an interval without a column" \
 	"$(ttl_state "SELECT pgcolumnar.set_options('ttl_hiv', ttl_interval => '1 day');")|$(q "SELECT coalesce(ttl_column::text, '-') || '|' || coalesce(ttl_interval::text, '-') FROM pgcolumnar.options WHERE regclass = 'ttl_hiv'::regclass;")" "|-|1 day"
 check "a retention column without an interval is no retention: refused (55000), every row kept" \
 	"$(ttl_state "SELECT pgcolumnar.expire('ttl_hcol');")|$(q 'SELECT count(*) FROM ttl_hcol')" "55000|3000"
-check "and an interval without a column is no retention either" \
-	"$(ttl_state "SELECT pgcolumnar.expire('ttl_hiv');")|$(q 'SELECT count(*) FROM ttl_hiv')" "55000|3000"
 
 # ---- a NULL that has been DELETED must stop pinning its group ---------------
 #
@@ -689,5 +687,11 @@ psql_run "CREATE TABLE ttl_n (ts timestamptz, v int) USING pgcolumnar;
 check_num "expire retires the aged groups and keeps those of NULLs" \
 	"$(q "SELECT pgcolumnar.expire('ttl_n');")" "2"
 check "a later expire on a column of only NULLs reads no zone map" "$(_expire_scans ttl_n)" "n=0 scans=0"
+
+# The interval-only half (#1341), LAST IN THE SUITE ON PURPOSE: with the reader's
+# column test removed, expire on ttl_hiv crashed the backend (PG17), and a crash
+# mid-suite takes the checks after it down with it, premises included.
+check "and an interval without a column is no retention either" \
+	"$(ttl_state "SELECT pgcolumnar.expire('ttl_hiv');")|$(q 'SELECT count(*) FROM ttl_hiv')" "55000|3000"
 
 pgc_summary
