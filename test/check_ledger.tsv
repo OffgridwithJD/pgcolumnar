@@ -51,6 +51,81 @@ approx_aggregates	approx_aggregates	tdigest over a columnar table gives exactly 
 approx_aggregates	approx_aggregates	the columnar table returns the 200,000 rows written, over 50,000 devices	15;16;17;18;19	2026-10-13	the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
 approx_aggregates	approx_aggregates	the hll aggregate reads through the columnar scan	15;16;17;18;19	2026-10-13	pgcolumnar.enable_custom_scan defaults to off, in both its C initializer and its GUC boot value;the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
 approx_aggregates	approx_aggregates	the tdigest aggregate reads through the columnar scan	15;16;17;18;19	2026-10-13	pgcolumnar.enable_custom_scan defaults to off, in both its C initializer and its GUC boot value;the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+arrow_import	arrow_import	a date32 before PostgreSQL's first date is refused	15;16;17;18;19	2026-10-14	the Arrow date decode without its range check
+arrow_import	arrow_import	a date32 file is refused for a bigint column, not read past its buffer	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date32 file is refused for a numeric(20,4) column, not read past its buffer	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date32 file is refused for a time column, not read past its buffer	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date32 file is refused for a timestamp column, not read past its buffer	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date32 file is refused for a uuid column, not read past its buffer	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date32 past PostgreSQL's last date is refused	15;16;17;18;19	2026-10-14	the Arrow date decode without its range check
+arrow_import	arrow_import	a date64 carrier decodes to the date it holds (#864)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date64 file is refused for a timestamp column	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date64 instant before the epoch floors rather than truncating	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date64 instant mid-day reports the day it falls in	15;16;17;18;19	never	-
+arrow_import	arrow_import	a date64 past PostgreSQL's last date is refused	15;16;17;18;19	2026-10-14	the Arrow date decode without its range check
+arrow_import	arrow_import	a decimal at another scale is refused (#881)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a float32 file is refused for float8 (#881)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a list element's nanosecond unit is honoured, not just the top level	15;16;17;18;19	never	-
+arrow_import	arrow_import	a lossy nanosecond file imports every row	15;16;17;18;19	never	-
+arrow_import	arrow_import	a nanosecond timestamp before the epoch floors rather than truncating	15;16;17;18;19	never	-
+arrow_import	arrow_import	a nanosecond timestamp truncates to microseconds	15;16;17;18;19	never	-
+arrow_import	arrow_import	a negative nanosecond time is refused, not narrowed into midnight	15;16;17;18;19	never	-
+arrow_import	arrow_import	a second count that overflows on scaling is refused, not wrapped	15;16;17;18;19	never	-
+arrow_import	arrow_import	a struct field's nanosecond unit is honoured at child index 1	15;16;17;18;19	never	-
+arrow_import	arrow_import	a time past midnight is refused	15;16;17;18;19	never	-
+arrow_import	arrow_import	a time32 in milliseconds decodes to the time it holds (#865)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a time32 in seconds decodes to the time it holds (#865)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a time64 column and a nested list are counted too, not just a top-level timestamp	15;16;17;18;19	never	-
+arrow_import	arrow_import	a time64 file is refused for a date column, not stored as year 687342	15;16;17;18;19	never	-
+arrow_import	arrow_import	a time64 in nanoseconds decodes to the time it holds (#865)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a timestamp before PostgreSQL's range is refused	15;16;17;18;19	never	-
+arrow_import	arrow_import	a timestamp file is refused for a date column	15;16;17;18;19	never	-
+arrow_import	arrow_import	a timestamp in milliseconds decodes to the instant it holds (#865)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a timestamp in nanoseconds decodes to the instant it holds (#865)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a timestamp in seconds decodes to the instant it holds (#865)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a uint64 file is refused for bigint (#881)	15;16;17;18;19	never	-
+arrow_import	arrow_import	a wider fixed-size binary is refused for uuid (#881)	15;16;17;18;19	never	-
+arrow_import	arrow_import	an int32 file is refused for bigint (#881)	15;16;17;18;19	never	-
+arrow_import	arrow_import	an int64 file is refused for a 4-byte int (#881)	15;16;17;18;19	never	-
+arrow_import	arrow_import	and a microsecond file	15;16;17;18;19	never	-
+arrow_import	arrow_import	and a refused import leaves the target empty	15;16;17;18;19	never	-
+arrow_import	arrow_import	and does not report the row count instead	15;16;17;18;19	never	-
+arrow_import	arrow_import	and that file imports every row as well	15;16;17;18;19	never	-
+arrow_import	arrow_import	backend still up after the import_arrow FIFO refusal	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a 16-byte fixed-size binary imports into uuid	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a matching decimal imports	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a matching float32 file imports into float4	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a matching float64 file imports into float8	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a matching int32 file imports into int	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a matching int64 file imports into bigint	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a microsecond file reports nothing	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: a non-temporal tag is not caught by the temporal refusal	15;16;17;18;19	never	-
+arrow_import	arrow_import	control: an ns file on microsecond boundaries reports nothing	15;16;17;18;19	never	-
+arrow_import	arrow_import	export rows	15;16;17;18;19	never	-
+arrow_import	arrow_import	finite row preserved	15;16;17;18;19	never	-
+arrow_import	arrow_import	import into an indexed table: a point lookup finds its row	15;16;17;18;19	never	-
+arrow_import	arrow_import	import into an indexed table: both scans agree	15;16;17;18;19	never	-
+arrow_import	arrow_import	import into an indexed table: the rows are there	15;16;17;18;19	never	-
+arrow_import	arrow_import	import rows	15;16;17;18;19	never	-
+arrow_import	arrow_import	import_arrow on a FIFO is refused, not a hang (XX001)	15;16;17;18;19	never	-
+arrow_import	arrow_import	importing the same keys twice raises unique_violation	15;16;17;18;19	never	-
+arrow_import	arrow_import	non-finite imported as null	15;16;17;18;19	never	-
+arrow_import	arrow_import	partial index covers its rows after import	15;16;17;18;19	never	-
+arrow_import	arrow_import	premise: a well-formed import reports 00000, so the probe reads success	15;16;17;18;19	never	-
+arrow_import	arrow_import	premise: and a date32 carrier, which shares Arrow's tag 8 with date64	15;16;17;18;19	never	-
+arrow_import	arrow_import	premise: and its own time unit does too	15;16;17;18;19	never	-
+arrow_import	arrow_import	premise: the exporter's own timestamp unit still imports correctly	15;16;17;18;19	never	-
+arrow_import	arrow_import	pyarrow import rows	15;16;17;18;19	never	-
+arrow_import	arrow_import	pyarrow values	15;16;17;18;19	never	-
+arrow_import	arrow_import	reject column-count mismatch	15;16;17;18;19	never	-
+arrow_import	arrow_import	reject dictionary-encoded file	15;16;17;18;19	never	-
+arrow_import	arrow_import	reject non-columnar target	15;16;17;18;19	never	-
+arrow_import	arrow_import	round trip identical	15;16;17;18;19	never	-
+arrow_import	arrow_import	so does a microsecond-exact nanosecond file	15;16;17;18;19	never	-
+arrow_import	arrow_import	the failed second import left the row count alone	15;16;17;18;19	never	-
+arrow_import	arrow_import	the index-scan check really uses the index	15;16;17;18;19	never	-
+arrow_import	arrow_import	the narrowed values are floored to the microsecond	15;16;17;18;19	never	-
+arrow_import	arrow_import	the narrowing reports the number of VALUES that lost digits, not rows	15;16;17;18;19	never	-
 autovacuum_expire	autovacuum_expire	OFF: with autovacuum_expire off the daemon retired nothing	15;16;17;18;19	2026-10-12	pgcolumnar.autovacuum_expire defaults to on, in both its C initializer and its GUC boot value;the daemon's loop runs expire for a retention table whether or not pgcolumnar.autovacuum_expire is on
 autovacuum_expire	autovacuum_expire	ON: a table with no retention is never named in a skipped line	15;16;17;18;19	2026-10-12	the daemon's loop runs expire on every columnar table when autovacuum_expire is on, the has_ttl filter removed
 autovacuum_expire	autovacuum_expire	ON: a table with no retention keeps every row	15;16;17;18;19	2026-10-12	the daemon runs expire on every table and PgColumnarReadTtl invents a 1 day retention on ts where none is declared
