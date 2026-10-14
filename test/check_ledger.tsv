@@ -1709,6 +1709,30 @@ harness_selftest	630-a-build-with-no-pg-config-must	and the refusal is make's ow
 harness_selftest	630-a-build-with-no-pg-config-must	and with stdin closed it refuses, rather than exiting 0 having done nothing	15;16;17;18;19	2026-10-13	sed given </dev/null but no refusal: make goes on with an empty PGXS and exits 0;the Makefile before #1344: an empty PGXS hands the CC probe's sed no file, so it reads stdin;the refusal fires but does not name PG_CONFIG
 harness_selftest	630-a-build-with-no-pg-config-must	premise: a reader of this stdin waits rather than reaching EOF	15;16;17;18;19	never	-
 harness_selftest	630-a-build-with-no-pg-config-must	premise: the selftest knows where the Makefile it drives is	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	export_arrow refuses SELECT of a table the caller cannot read	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	export_parquet refuses SELECT of a table the caller cannot read	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	get_storage_id refuses a caller who cannot SELECT the relation	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	import_arrow refuses INSERT into a table the caller cannot write	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	import_parquet refuses INSERT into a table the caller cannot write	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	no victim file was written by the export attempts	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	nor by the parallel export	15;16;17;18;19	2026-10-14	parallel_export_parquet without its SELECT check on the target
+import_export_privilege	import_export_privilege	parallel_copy refuses INSERT into a table the caller cannot write	15;16;17;18;19	2026-10-14	parallel_copy without its INSERT check on the target
+import_export_privilege	import_export_privilege	parallel_export_parquet refuses SELECT of a table the caller cannot read	15;16;17;18;19	2026-10-14	parallel_export_parquet without its SELECT check on the target
+import_export_privilege	import_export_privilege	premise: the attacker can execute the functions (so a refusal is the table ACL)	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: the attacker can open a session	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: the attacker has NO privilege on victim	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: the attacker holds pg_read_server_files	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: the attacker holds pg_write_server_files	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: the attacker reaches the schema (so a refusal is not schema USAGE)	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: the attacker's own source files exist	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	premise: victim has its rows before any import is attempted	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	the owner can still export_arrow its own table	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	the owner can still export_parquet its own table	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	the owner can still import into its own table	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	the owner can still parallel_copy into its own table	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	the owner can still parallel_export_parquet its own table	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	the owner can still read its own storage id	15;16;17;18;19	never	-
+import_export_privilege	import_export_privilege	victim still holds exactly its own rows (no import landed)	15;16;17;18;19	2026-10-14	parallel_copy without its INSERT check on the target
 index_am_support	index_am_support	an overlap query reaches the row through a GiST index	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
