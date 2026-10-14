@@ -172,17 +172,25 @@ refusal_as() {	# refusal_as ROLE SQL -> "SQLSTATE message" of its error, or "ok"
 	case "$out" in *ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\): \(.*\)$/\1 \2/p' <<<"$out" | head -1;; *) echo "ok: $out";; esac
 }
 _half="28000 columnar: the user mapping for server \"csrv\" carries only half a credential"
-_reqs_before="$(wc -l < "$S3_LOG" 2>/dev/null || echo 0)"
+# Each arm starts on a server that accepts connections: a backend that crashes on
+# one arm must not fail the next one for it (measured: without the pairing check
+# the half-credential read does crash its backend).
+await_up() { local i; for i in $(seq 1 60); do [ "$(q 'SELECT 1' 2>/dev/null)" = 1 ] && return; sleep 0.5; done; }
+_log_lines() { wc -l < "$S3_LOG" 2>/dev/null || echo 0; }
+_reqs_before="$(_log_lines)"
+q_as cred_alice "SELECT count(*) FROM fs3" >/dev/null
+check "control: a full mapping's read reaches the endpoint, so the log counts requests" \
+	"$([ "$(( $(_log_lines) - _reqs_before ))" -gt 0 ] && echo reached || echo "nothing logged")" "reached"
+_reqs_before="$(_log_lines)"
+await_up
 check "a mapping with an access key and no secret is refused before any request (28000)" \
 	"$(refusal_as cred_dave "SELECT count(*) FROM fs3")" "$_half"
+await_up
 check "and one with a secret and no access key is refused the same way" \
 	"$(refusal_as cred_erin "SELECT count(*) FROM fs3")" "$_half"
+await_up
 check "and neither half-credential read reached the endpoint" \
-	"$(( $(wc -l < "$S3_LOG" 2>/dev/null || echo 0) - _reqs_before ))" "0"
-_reqs_before="$(wc -l < "$S3_LOG" 2>/dev/null || echo 0)"
-q_as cred_alice "SELECT count(*) FROM fs3" >/dev/null
-check "control: alice's read in the same way does reach it, so the log counts requests" \
-	"$([ "$(( $(wc -l < "$S3_LOG" 2>/dev/null || echo 0) - _reqs_before ))" -gt 0 ] && echo reached || echo "nothing logged")" "reached"
+	"$(( $(_log_lines) - _reqs_before ))" "0"
 
 # ---- no-leak arm ------------------------------------------------------------
 BOB_ERR="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U cred_bob \
