@@ -2575,4 +2575,15 @@ suites_not_covered 229
 #     never         2352 + 10 = 2362
 #     dated          777 + 16 = 793
 #     2362 + 793 == 3155
-checks_never_observed_red 2362
+#
+# #1341, rls_direct_storage's two scan-dependent premises (OffgridwithJD, #1397 review):
+# 2362 -> 2361. Both read the table through the columnar scan, so they are checks and
+# lose the prefix, renamed with their rows. "the policy is in force for ordinary SQL"
+# is dated by the custom scan dropping its quals (the restricted role then saw all 200
+# rows); the owner's count arrives never. Five-major runs: 26/26 on 15-19.
+#
+#     ledger rows   3155     = 3155
+#     never         2362 - 1 = 2361
+#     dated          793 + 1 = 794
+#     2361 + 794 == 3155
+checks_never_observed_red 2361
