@@ -145,6 +145,107 @@ done
 check "an outer delete survives an aborted inner block, as on heap" \
 	"$(q "SELECT count(*) || '|' || sum(id) FROM sx_pgcolumnar")" "$(q "SELECT count(*) || '|' || sum(id) FROM sx_heap")"
 
+# ---- a read inside an aborted inner block keeps the outer statement's rows (#1360) -
+#
+# A read of the table inside the block must see the rows the outer INSERT has
+# buffered so far, as heap's does, so it flushes them. That flush's catalog rows
+# belonged to the block's subtransaction, and its rollback took the outer rows with
+# them: 1 row of 3000 survived. The read's answer is pinned too, so a fix cannot
+# trade the lost rows for a read that misses them. Every arm runs on heap as well,
+# and the columnar answer must be heap's. HOW: abort (the block raises after the
+# read), nested (the read is in a block that commits into one that raises), commit
+# (nothing raises: the control).
+psql_run "CREATE FUNCTION sx_rd(i int, t text, how text) RETURNS int LANGUAGE plpgsql AS \$\$
+DECLARE n int; c text; sq text;
+BEGIN
+	IF how = 'once' AND i <> 2 THEN RETURN NULL; END IF;
+	BEGIN
+		IF how = 'delself' THEN
+			c := current_setting('pgcolumnar.enable_custom_scan'); sq := current_setting('enable_seqscan');
+			PERFORM set_config('pgcolumnar.enable_custom_scan', 'off', true), set_config('enable_seqscan', 'off', true);
+			EXECUTE format('DELETE FROM %s WHERE id = %s', t, i + 1);
+			PERFORM set_config('pgcolumnar.enable_custom_scan', c, true), set_config('enable_seqscan', sq, true);
+		END IF;
+		IF how = 'nested' THEN
+			BEGIN
+				EXECUTE format('SELECT count(*) FROM %s', t) INTO n;
+			EXCEPTION WHEN no_data_found THEN NULL;
+			END;
+		ELSE
+			EXECUTE format('SELECT count(*) FROM %s', t) INTO n;
+		END IF;
+		IF how <> 'commit' THEN PERFORM 1 / 0; END IF;
+	EXCEPTION WHEN division_by_zero THEN NULL;
+	END;
+	RETURN n;
+END \$\$;"
+for how in abort nested commit; do
+	for am in pgcolumnar heap; do
+		psql_run "CREATE TABLE rd_${how}_$am (id int PRIMARY KEY, seen int) USING $am;"
+		psql_run "INSERT INTO rd_${how}_$am SELECT g, sx_rd(g, 'rd_${how}_$am', '$how') FROM generate_series(1, 1000) g;"
+	done
+done
+rd_shape() { q "SELECT count(*) || '|' || sum(id) FROM rd_$1"; }
+rd_seen() { q "SELECT sum(seen) FROM rd_$1"; }
+check "an outer insert survives a read of its own table inside an aborted inner block, as on heap" \
+	"$(rd_shape abort_pgcolumnar)" "$(rd_shape abort_heap)"
+check "and that read saw the rows the outer statement had inserted so far, as on heap" \
+	"$(rd_seen abort_pgcolumnar)" "$(rd_seen abort_heap)"
+rd_off="SET enable_seqscan = off; SET enable_bitmapscan = off;"
+rd_all="SELECT count(*) FROM rd_abort_pgcolumnar WHERE id BETWEEN 1 AND 1000"
+check "and the primary key finds every outer row by index" \
+	"$(q "$rd_off EXPLAIN (COSTS OFF) $rd_all" | grep -q 'Index' && echo index || echo other)|$(q "$rd_off $rd_all" | tail -1)" \
+	"index|1000"
+check "an outer insert survives a read in a nested block that commits into an aborted one, as on heap" \
+	"$(rd_shape nested_pgcolumnar)|$(rd_seen nested_pgcolumnar)" "$(rd_shape nested_heap)|$(rd_seen nested_heap)"
+check "a read inside an inner block that commits keeps every outer row once, as on heap" \
+	"$(rd_shape commit_pgcolumnar)|$(rd_seen commit_pgcolumnar)" "$(rd_shape commit_heap)|$(rd_seen commit_heap)"
+# The same for the delete marks an outer DELETE has buffered: the read flushes them,
+# and the block's rollback took them away, so the deleted rows came back.
+for am in pgcolumnar heap; do
+	psql_run "CREATE TABLE rd_del_$am (id int, seen int) USING $am;"
+	psql_run "INSERT INTO rd_del_$am SELECT g, 0 FROM generate_series(1, 1000) g;"
+	psql_run "DELETE FROM rd_del_$am WHERE id % 2 = 0 AND sx_rd(id, 'rd_del_$am', 'abort') IS NOT NULL;"
+done
+check "an outer delete survives a read of its own table inside an aborted inner block, as on heap" \
+	"$(rd_shape del_pgcolumnar)" "$(rd_shape del_heap)"
+# The block deletes the next row by index before its read. That path writes no
+# enclosing marks first, so the block's own mark is on disk when the read writes the
+# outer marks; it must not be carried into them and written again after the abort.
+for am in pgcolumnar heap; do
+	psql_run "CREATE TABLE rd_ds_$am (id int PRIMARY KEY, seen int) USING $am;"
+	psql_run "INSERT INTO rd_ds_$am SELECT g, 0 FROM generate_series(1, 1000) g;"
+	psql_run "DELETE FROM rd_ds_$am WHERE id % 2 = 0 AND sx_rd(id, 'rd_ds_$am', 'delself') IS NOT NULL;"
+done
+check "and a delete the aborted block made itself stays undone, as on heap" \
+	"$(rd_shape ds_pgcolumnar)" "$(rd_shape ds_heap)"
+# THE COST IS LINEAR IN THE ROWS (#1403 review). Each abort undoes the catalog rows the
+# block's read wrote, and the next read must write the enclosing rows out again. Kept
+# as one growing stripe, that rewrote every earlier row each time: at twice the rows,
+# about four times the file. A relation's size at 2n must stay under 2.5 times its size
+# at n; the rows are incompressible, so the size measures what was written.
+for sz in 400 800; do
+	psql_run "CREATE TABLE rd_sz_$sz (id int, seen int, pad text) USING pgcolumnar;
+	          INSERT INTO rd_sz_$sz SELECT g, sx_rd(g, 'rd_sz_$sz', 'abort'),
+	                 md5(g::text) || md5((g + 1)::text) || md5((g + 2)::text) FROM generate_series(1, $sz) g;"
+done
+check "a read in an aborted block at twice the rows writes under 2.5 times the file, with every row kept" \
+	"$(q "SELECT (SELECT count(*) FROM rd_sz_400) || '|' || (SELECT count(*) FROM rd_sz_800) || '|' ||
+	             CASE WHEN pg_relation_size('rd_sz_800') < 2.5 * pg_relation_size('rd_sz_400') THEN 'linear'
+	                  ELSE 'x' || round(pg_relation_size('rd_sz_800')::numeric / pg_relation_size('rd_sz_400'), 1) END")" \
+	"400|800|linear"
+# AND ONE READ COSTS ONE WRITE, NOT THE REST OF THE STATEMENT (#1403 review). Eager
+# until the statement ended, a single read early in a bulk INSERT made every later
+# row its own row group: 20,000 rows, 19,999 groups, 164 MB. Eager for one write, it
+# writes the kept rows once more with the next row, then buffers as before.
+psql_run "CREATE TABLE rd_once (id int, seen int, pad text) USING pgcolumnar;
+          INSERT INTO rd_once SELECT g, sx_rd(g, 'rd_once', 'once'), md5(g::text) FROM generate_series(1, 5000) g;"
+check "a single read early in a 5000-row insert keeps every row in at most 3 row groups" \
+	"$(q "SELECT (SELECT count(*) FROM rd_once) || '|' ||
+	             CASE WHEN (SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('rd_once')) <= 3
+	                  THEN 'few' ELSE (SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('rd_once'))::text || ' groups' END")" \
+	"5000|few"
+
 # ---- an insert racing an uncommitted delete of its key (#1341) ----------------------
 #
 # Session 1 deletes key k and has not committed; session 2 inserts k. On heap session

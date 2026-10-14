@@ -667,4 +667,6 @@ guard_tests 433
 # by collection over the cluster files on this tree.
 # cluster_tests 564 -> 565 for #1341 item 19's test_a_type_change_without_a_rewrite in
 # test_collation_change.py, by collection over the cluster files on this tree.
-cluster_tests 565
+# cluster_tests 565 -> 566 for #1360's test_a_read_inside_an_aborted_inner_block_keeps_the_outer_statements_rows
+# in test_am_contracts.py, by collection over the cluster files on this tree.
+cluster_tests 566
