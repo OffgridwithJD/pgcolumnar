@@ -2586,4 +2586,14 @@ suites_not_covered 229
 #     never         2362 - 1 = 2361
 #     dated          793 + 1 = 794
 #     2361 + 794 == 3155
-checks_never_observed_red 2361
+#
+# #1383 review (OffgridwithJD): 2361 -> 2360. "the source files the import arms need exist"
+# loses the premise prefix: the owner's export writes those files, and an export that
+# writes nothing reddens it in both twins (the twin now fails it by name instead of
+# raising), with the owner-export arm beside it. Five-major runs: 26/26 on 15-19.
+#
+#     ledger rows   3155     = 3155
+#     never         2361 - 1 = 2360
+#     dated          794 + 1 = 795
+#     2360 + 795 == 3155
+checks_never_observed_red 2360

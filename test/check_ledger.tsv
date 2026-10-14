@@ -2647,7 +2647,7 @@ rls_direct_storage	rls_direct_storage	a table with NO policy is still readable b
 rls_direct_storage	rls_direct_storage	and no imported row landed in the restricted table	15;16;17;18;19	2026-10-14	PgColumnarRequireNoRowSecurity never refuses (the RLS guard deleted)
 rls_direct_storage	rls_direct_storage	and read_projection tells it the same thing, not that RLS exists	15;16;17;18;19	2026-10-14	read_projection checks RLS before the table ACL
 rls_direct_storage	rls_direct_storage	and still exportable by it	15;16;17;18;19	never	-
-rls_direct_storage	rls_direct_storage	and the owner can still export it	15;16;17;18;19	2026-10-14	the RLS guard refuses anything but RLS_NONE so the owner and superuser (RLS_NONE_ENV) are refused too
+rls_direct_storage	rls_direct_storage	and the owner can still export it	15;16;17;18;19	2026-10-14	export_parquet writes no file (total = 0);the RLS guard refuses anything but RLS_NONE so the owner and superuser (RLS_NONE_ENV) are refused too
 rls_direct_storage	rls_direct_storage	export_arrow refuses one	15;16;17;18;19	2026-10-14	PgColumnarRequireNoRowSecurity never refuses (the RLS guard deleted)
 rls_direct_storage	rls_direct_storage	export_parquet refuses one	15;16;17;18;19	2026-10-14	PgColumnarRequireNoRowSecurity never refuses (the RLS guard deleted)
 rls_direct_storage	rls_direct_storage	import_arrow refuses one	15;16;17;18;19	2026-10-14	PgColumnarRequireNoRowSecurity never refuses (the RLS guard deleted)
@@ -2666,7 +2666,7 @@ rls_direct_storage	rls_direct_storage	so no caller without privilege learns RLS 
 rls_direct_storage	rls_direct_storage	the OWNER can still read the RLS table's storage (RLS_NONE_ENV)	15;16;17;18;19	2026-10-14	the RLS guard refuses anything but RLS_NONE so the owner and superuser (RLS_NONE_ENV) are refused too
 rls_direct_storage	rls_direct_storage	the owner sees every row, so the policy hides something real	15;16;17;18;19	never	-
 rls_direct_storage	rls_direct_storage	the policy is in force for ordinary SQL	15;16;17;18;19	2026-10-14	the custom scan drops its quals (plan.qual = NIL)
-rls_direct_storage	rls_direct_storage	the source files the import arms need exist	15;16;17;18;19	never	-
+rls_direct_storage	rls_direct_storage	the source files the import arms need exist	15;16;17;18;19	2026-10-14	export_parquet writes no file (total = 0)
 rls_direct_storage	rls_direct_storage	under FORCE the non-superuser owner IS refused, so owner-only is no substitute	15;16;17;18;19	2026-10-14	PgColumnarRequireNoRowSecurity never refuses (the RLS guard deleted)
 rls_direct_storage	rls_direct_storage	without FORCE the owner is allowed, because RLS_NONE_ENV is not RLS_ENABLED	15;16;17;18;19	2026-10-14	the RLS guard refuses anything but RLS_NONE so the owner and superuser (RLS_NONE_ENV) are refused too
 rollup	rollup	* with anything but count is refused	15;16;17;18;19	2026-10-13	create_rollup allowing * with any function
