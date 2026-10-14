@@ -77,8 +77,7 @@ def _set_hash(conn, query):
 
 
 def _write_stream(pa, path, table, options=None):
-    import pyarrow.ipc as ipc
-    with ipc.new_stream(pa.OSFile(str(path), "wb"), table.schema, options=options) as w:
+    with pa.ipc.new_stream(pa.OSFile(str(path), "wb"), table.schema, options=options) as w:
         w.write_table(table)
 
 
@@ -241,7 +240,6 @@ def test_the_refusals_and_every_temporal_carrier(pgc_conn, server_dir, expect):
     pa = expect.require_module("pyarrow", name="reject dictionary-encoded file")
     if pa is None:
         return
-    import pyarrow.ipc as ipc
     conn = pgc_conn
 
     _write_stream(pa, server_dir / "dict.arrows", pa.table({"c": pa.array(["a", "b", "a", "b"]).dictionary_encode()}))
@@ -254,7 +252,7 @@ def test_the_refusals_and_every_temporal_carrier(pgc_conn, server_dir, expect):
     zipf = server_dir / "compressed.arrows"
     if codec:
         _write_stream(pa, zipf, pa.table({"a": pa.array(range(1000), pa.int64())}),
-                      options=ipc.IpcWriteOptions(compression=codec))
+                      options=pa.ipc.IpcWriteOptions(compression=codec))
     _run(conn, "CREATE TABLE ri_z (a bigint) USING pgcolumnar")
     expect.text("codec" if codec in ("zstd", "lz4") else f"none ({codec})", "codec",
                 "premise: this pyarrow writes a compressed body (zstd or lz4)")
