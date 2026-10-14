@@ -2256,7 +2256,7 @@ ttl_expire	ttl_expire	a negative ttl_interval is refused with 22023	15;16;17;18;
 ttl_expire	ttl_expire	a no-op expire reads no zone map when the extent's minimum is past the cutoff	15;16;17;18;19	2026-10-13	expire's early exit removed (the tree before #1310)
 ttl_expire	ttl_expire	a rolled-back expire records nothing	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	a row dated exactly on the cutoff is kept, so truncation errs toward keeping	15;16;17;18;19	never	-
-ttl_expire	ttl_expire	a table with no declared retention is an error, not a silent success	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	a table with no declared retention is an error, not a silent success	15;16;17;18;19	2026-10-14	the no-retention refusal raised as XX000 rather than 55000
 ttl_expire	ttl_expire	and VACUUM really did set visibility-map bits to clear	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	and a zero ttl_interval is refused too	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	and its rows are gone	15;16;17;18;19	never	-
@@ -2269,6 +2269,7 @@ ttl_expire	ttl_expire	and the table really is smaller than it was	15;16;17;18;19
 ttl_expire	ttl_expire	and they are the groups gone from the row-group catalog	15;16;17;18;19	2026-10-13	the early exit compares the extent's maximum to the cutoff instead of its minimum
 ttl_expire	ttl_expire	and those NULL rows are still there	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	but the zone map still records the deleted NULLs	15;16;17;18;19	never	-
+ttl_expire	ttl_expire	compact_rewrite retired a group	15;16;17;18;19	2026-10-14	compact_rewrite returning 0 before rewriting anything
 ttl_expire	ttl_expire	control: a group whose NULLs are still live is NOT retired	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	control: and a positive one is still accepted	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	control: and the rows are all still there	15;16;17;18;19	never	-
@@ -2292,7 +2293,6 @@ ttl_expire	ttl_expire	premise: an index-only scan is chosen on the all-visible t
 ttl_expire	ttl_expire	premise: and every live row is past the retention	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: and rows dated exactly ON the cutoff, which decide the rounding	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: and the SAME row group holds expired rows and NULL ones	15;16;17;18;19	never	-
-ttl_expire	ttl_expire	compact_rewrite retired a group	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: in UTC the fixture straddles that session's cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: in a zone on another date the fixture straddles that session's cutoff	15;16;17;18;19	never	-
 ttl_expire	ttl_expire	premise: no LIVE row holds a NULL retention value any more	15;16;17;18;19	never	-
