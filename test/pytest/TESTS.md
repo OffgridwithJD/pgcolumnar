@@ -161,6 +161,7 @@ behaviour, the source of that number is named.
 - [113. test_vacuum_lock_privilege.py: maintenance refuses a non-owner before taking its lock](#113-test_vacuum_lock_privilegepy-maintenance-refuses-a-non-owner-before-taking-its-lock)
 - [114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap](#114-test_vm_privilegepy-the-visibility-map-entry-points-are-owner-only-and-refuse-heap)
 - [115. test_alter_table_scans.py: ALTER TABLE forms see the live rows and only those](#115-test_alter_table_scanspy-alter-table-forms-see-the-live-rows-and-only-those)
+- [116. test_settings_reference.py: the settings reference matches the server](#116-test_settings_referencepy-the-settings-reference-matches-the-server)
 
 ## 1. How to read a test in here
 
@@ -6970,3 +6971,16 @@ The pytest twin of `test/alter_table_scans.sh` (#1341), every check by the shell
 | test | what it holds |
 | --- | --- |
 | `test_alter_table_forms_see_the_live_rows_and_only_those` | the three refusals and three acceptances against heap, both rewrites, and the index lookup after them |
+
+## 116. test_settings_reference.py: the settings reference matches the server
+
+The pytest twin of `test/settings_reference.sh` (#1341 items 42, 57 and 83), every check by the shell's name. It reads each `pgcolumnar.*` row of `docs/configuration.md` and compares it with `pg_settings` both ways. Every setting the server defines is documented, except the ones the server marks `NOT_IN_SAMPLE` (developer hooks and internal switches). Every documented setting exists. Each documented default is the server's `boot_val`. Each row's condition ("superuser", "only at server start", "Reloadable", or none of these) is the server's context. A role that is not a superuser, on its own login, is refused `enable_end_truncation` with 42501; a superuser sets it. `compression_level` reaches the zstd codec: the same text stores smaller at level 19 than at level 1. A build without zstd cannot run that test.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_reference_and_the_server_name_the_same_settings` | at least thirty documented settings, none undocumented, none documented that the server lacks |
+| `test_each_documented_default_and_condition_is_the_servers` | each documented default and condition matches `boot_val` and `context` |
+| `test_only_a_superuser_sets_enable_end_truncation` | the 42501 refusal on a real login, and the superuser control |
+| `test_compression_level_reaches_the_zstd_codec` | level 19 stores less than level 1 |
