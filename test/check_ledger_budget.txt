@@ -2344,4 +2344,22 @@ suites_not_covered 231
 #     never         2273 + 5 = 2278
 #     dated          696 + 10 = 706
 #     2278 + 706 == 2984
+#
+# #1341 items 42, 57 and 83, the settings reference held to the server: 2095 stays
+# 2095. The settings_reference suite enters with 8 checks from five-major runs (8/8
+# on each of 15-19), and all 8 are dated on PG17 by seven mutants:
+#   - enable_end_truncation defined PGC_USERSET: the condition arm and the 42501
+#     refusal go red;
+#   - enable_end_truncation defined PGC_POSTMASTER: the condition arm, the refusal
+#     (55P02) and the superuser control go red;
+#   - compression_level's default 3 changed to 5: the default arm goes red;
+#   - try_zstd passing level 1, not the setting: the level arm goes red;
+#   - the compression_level row deleted from the reference: the undocumented arm;
+#   - the row renamed compression_levl: the existence arm and three others;
+#   - the backticks removed from every name: the thirty-settings premise.
+#
+#     ledger rows   2984 + 8 = 2992
+#     never         2278 + 0 = 2278
+#     dated          706 + 8 = 714
+#     2278 + 714 == 2992
 checks_never_observed_red 2278

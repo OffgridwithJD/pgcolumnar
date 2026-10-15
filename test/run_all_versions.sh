@@ -293,6 +293,7 @@ SUITES=(
 	scan_decode_cost
 	scan_direction
 	server_file_privilege
+	settings_reference
 	smoke
 	sort_status
 	sort_status_privilege

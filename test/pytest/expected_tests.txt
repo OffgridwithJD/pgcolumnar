@@ -679,4 +679,6 @@ guard_tests 435
 # test_am_contracts.py, by collection over the cluster files on this tree.
 # cluster_tests 569 -> 570 for #1341's test_alter_table_scans.py, one test, by collection
 # over the cluster files on this tree.
-cluster_tests 570
+# cluster_tests 570 -> 574 for #1341's test_settings_reference.py, four tests, by collection
+# over the cluster files on this tree.
+cluster_tests 574
