@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 231
+suites_not_covered 230
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2425,4 +2425,24 @@ suites_not_covered 231
 #     never         2282 + 0 = 2282
 #     dated          735 + 4 = 739
 #     2282 + 739 == 3021
-checks_never_observed_red 2282
+#
+# #1341 items 55, 56 and 16, the row-identity lock out of SQL's reach,
+# bulk_parallel_writer set by hand, and the row_lock_buckets bound (jdatcmd): 2282 ->
+# 2291, and suites_not_covered 231 -> 230. advisory_lock_class had no rows; it enters
+# with all 17 checks from five-major runs (17/17 on each of 15-19). Eight are dated on
+# PG17:
+#   - the row-identity class put at 2: the class-104 arm, the UPDATE's reachable-class
+#     arm and its contention arm;
+#   - the unique-key class put back at 2 (#430): the INSERT's reachable-class arm and
+#     its contention arm;
+#   - the storage-row lock skipped whenever bulk_parallel_writer is on: the second
+#     first write fails on storage_pkey;
+#   - the bucket taken as the raw key, one row lock per row: the bulk UPDATE fails
+#     with "out of shared memory", which reddens its lock-count arm and its row arm.
+# The other nine arrive never: seeding a suite moves the census up by its undated rows.
+#
+#     ledger rows   3021 + 17 = 3038
+#     never         2282 + 9 = 2291
+#     dated          739 + 8 = 747
+#     2291 + 747 == 3038
+checks_never_observed_red 2291
