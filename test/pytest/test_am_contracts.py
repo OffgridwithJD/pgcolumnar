@@ -448,3 +448,53 @@ def test_reindex_reclaims_the_entries_of_rows_no_snapshot_sees(pgc_conn, expect)
         cur.execute("RESET enable_seqscan")
     expect.text(f"{col}|{heap}|{found}", "reclaimed|reclaimed|10000",
                 "REINDEX after a committed delete of most rows reclaims their entries, as heap's does")
+
+
+def test_the_documented_refusals_change_nothing(pgc_conn, expect):
+    """Each is refused where it is chosen, as limitations.md says, and nothing is left
+    changed by the attempt (#1341 items 44, 51, 77). A failed concurrent build leaves
+    its index behind, marked invalid, as core does for any such failure."""
+    import os
+    import shutil
+    import tempfile
+
+    def state(sql):
+        try:
+            with pgc_conn.cursor() as cur:
+                cur.execute(sql)
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate or "?"
+
+    count = "SELECT count(*) || '|' || sum(a) FROM rf"
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE rf (a int) USING pgcolumnar")
+        cur.execute("INSERT INTO rf SELECT g FROM generate_series(1, 5000) g")
+    expect.text(f"{state('CREATE UNLOGGED TABLE rf_u (a int) USING pgcolumnar')}|"
+                f"{_one(pgc_conn, 'SELECT count(*) FROM pg_class WHERE relname = ' + repr('rf_u'))}",
+                "0A000|0", "CREATE UNLOGGED TABLE ... USING pgcolumnar is refused (0A000) and leaves no table")
+    expect.text(f"{state('ALTER TABLE rf SET UNLOGGED')}|"
+                f"{_one(pgc_conn, 'SELECT relpersistence FROM pg_class WHERE relname = ' + repr('rf'))}|"
+                f"{_one(pgc_conn, count)}",
+                "0A000|p|5000|12502500", "ALTER TABLE ... SET UNLOGGED is refused (0A000), and the table stays logged with its rows")
+
+    # A tablespace directory the server's own user owns, outside any root-only parent.
+    ts = tempfile.mkdtemp(prefix="pgc-rf-ts-", dir="/tmp")
+    os.chmod(ts, 0o700)
+    if os.geteuid() == 0:
+        shutil.chown(ts, user="postgres")
+    try:
+        with pgc_conn.cursor() as cur:
+            cur.execute(f"CREATE TABLESPACE rf_ts_py LOCATION '{ts}'")
+        expect.text(f"{state('ALTER TABLE rf SET TABLESPACE rf_ts_py')}|"
+                    f"{_one(pgc_conn, 'SELECT reltablespace FROM pg_class WHERE relname = ' + repr('rf'))}|"
+                    f"{_one(pgc_conn, count)}",
+                    "0A000|0|5000|12502500", "ALTER TABLE ... SET TABLESPACE is refused (0A000), and the table stays where it was with its rows")
+    finally:
+        with pgc_conn.cursor() as cur:
+            cur.execute("DROP TABLESPACE IF EXISTS rf_ts_py")
+        shutil.rmtree(ts, ignore_errors=True)
+
+    expect.text(f"{state('CREATE INDEX CONCURRENTLY rf_cic ON rf (a)')}|"
+                f"{_one(pgc_conn, 'SELECT indisvalid FROM pg_index WHERE indexrelid = ' + repr('rf_cic') + '::regclass')}",
+                "0A000|False", "CREATE INDEX CONCURRENTLY is refused (0A000), and the index it leaves is marked invalid")

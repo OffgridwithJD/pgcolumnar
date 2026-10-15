@@ -2414,4 +2414,15 @@ suites_not_covered 231
 #     never         2282 + 0 = 2282
 #     dated          726 + 9 = 735
 #     2282 + 735 == 3017
+#
+# #1341 items 44, 51 and 77, the documented refusals (jdatcmd): 2282 -> 2282.
+# am_contracts gains four checks from five-major runs (31/31 on each of 15-19), all
+# dated: CREATE UNLOGGED and SET UNLOGGED by the storage hook accepting an unlogged
+# table, CREATE INDEX CONCURRENTLY by its validate scan doing nothing, and SET
+# TABLESPACE by the relation copy returning without copying.
+#
+#     ledger rows   3017 + 4 = 3021
+#     never         2282 + 0 = 2282
+#     dated          735 + 4 = 739
+#     2282 + 739 == 3021
 checks_never_observed_red 2282

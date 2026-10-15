@@ -657,7 +657,8 @@ other than where the feature is used:
   `ON CONFLICT DO NOTHING` takes no row lock and works, with or without a conflict
   target.
 
-`CREATE TABLE` refuses an unlogged columnar table for the same reason. Both cases
+`CREATE TABLE` refuses an unlogged columnar table for the same reason, and so does
+`ALTER TABLE ... SET UNLOGGED`. Both cases
 follow one rule. This access method refuses a configuration that it cannot
 support at the point where you choose it. It does not refuse it at each later
 use.
@@ -783,7 +784,11 @@ therefore still be cheaper as a scan.
   of a deleted row only while a transaction that began before the delete is still
   running, as it does on heap.
 - `CREATE INDEX CONCURRENTLY` (the concurrent validate path) and partial
-  block-range index builds are not supported.
+  block-range index builds are not supported. A refused `CREATE INDEX
+  CONCURRENTLY` leaves its index behind, marked invalid, as PostgreSQL does for any
+  concurrent build that fails. Drop that index before you build it again.
+- `ALTER TABLE ... SET TABLESPACE` is not supported on a columnar table. It is
+  refused, and the table stays where it was.
 
 ## Constraints on the import path
 

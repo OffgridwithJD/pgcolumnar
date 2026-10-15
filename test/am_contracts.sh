@@ -351,4 +351,23 @@ check "REINDEX after a committed delete of most rows reclaims their entries, as 
 	"$(ix_reclaim pgcolumnar)|$(ix_reclaim heap)|$(q "SET enable_seqscan = off; SELECT count(*) FROM ix_pgcolumnar WHERE a > 0;" | tail -1)" \
 	"reclaimed|reclaimed|10000"
 
+# ---- documented refusals (#1341 items 44, 51, 77) ----------------------------------
+#
+# Each is refused where it is chosen, as limitations.md says, and refused cleanly:
+# nothing is left changed by the attempt.
+rf_count() { q "SELECT count(*) || '|' || sum(a) FROM rf"; }
+psql_run "CREATE TABLE rf (a int) USING pgcolumnar; INSERT INTO rf SELECT g FROM generate_series(1, 5000) g;"
+check "CREATE UNLOGGED TABLE ... USING pgcolumnar is refused (0A000) and leaves no table" \
+	"$(state "CREATE UNLOGGED TABLE rf_u (a int) USING pgcolumnar")|$(q "SELECT count(*) FROM pg_class WHERE relname = 'rf_u'")" "0A000|0"
+check "ALTER TABLE ... SET UNLOGGED is refused (0A000), and the table stays logged with its rows" \
+	"$(state "ALTER TABLE rf SET UNLOGGED")|$(q "SELECT relpersistence FROM pg_class WHERE relname = 'rf'")|$(rf_count)" "0A000|p|5000|12502500"
+pgc_pg "mkdir -p -m 700 '$PGC_WORKDIR/rf_ts'"
+psql_run "CREATE TABLESPACE rf_ts LOCATION '$PGC_WORKDIR/rf_ts';"
+check "ALTER TABLE ... SET TABLESPACE is refused (0A000), and the table stays where it was with its rows" \
+	"$(state "ALTER TABLE rf SET TABLESPACE rf_ts")|$(q "SELECT reltablespace FROM pg_class WHERE relname = 'rf'")|$(rf_count)" "0A000|0|5000|12502500"
+# A failed concurrent build leaves its index behind, marked invalid, as core does for
+# any CREATE INDEX CONCURRENTLY that fails after its first phase.
+check "CREATE INDEX CONCURRENTLY is refused (0A000), and the index it leaves is marked invalid" \
+	"$(state "CREATE INDEX CONCURRENTLY rf_cic ON rf (a)")|$(q "SELECT indisvalid FROM pg_index WHERE indexrelid = 'rf_cic'::regclass")" "0A000|f"
+
 pgc_summary
