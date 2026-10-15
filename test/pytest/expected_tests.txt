@@ -692,4 +692,5 @@ guard_tests 435
 # cluster_tests 578 -> 579 for #1341's test_the_documented_refusals_change_nothing in
 # cluster_tests 579 -> 581 for #1341 items 56 and 55: test_the_row_identity_lock_cannot_be_reached_from_sql
 # and test_bulk_parallel_writer_set_by_hand_still_serialises_a_first_write in
-cluster_tests 581
+# cluster_tests 581 -> 582 for #1341's test_maintenance_rollback.py, one test, by collection
+cluster_tests 582

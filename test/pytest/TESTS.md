@@ -165,6 +165,7 @@ behaviour, the source of that number is named.
 - [117. test_large_values.py: megabyte-scale values are stored exactly](#117-test_large_valuespy-megabyte-scale-values-are-stored-exactly)
 - [118. test_recovery_minimal_wal.py: tables that skip WAL survive a crash](#118-test_recovery_minimal_walpy-tables-that-skip-wal-survive-a-crash)
 - [119. test_statement_self_visibility.py: a statement does not see its own writes](#119-test_statement_self_visibilitypy-a-statement-does-not-see-its-own-writes)
+- [120. test_maintenance_rollback.py: a maintenance function that rolls back leaves the table as it was](#120-test_maintenance_rollbackpy-a-maintenance-function-that-rolls-back-leaves-the-table-as-it-was)
 
 ## 1. How to read a test in here
 
@@ -7021,3 +7022,13 @@ The pytest twin of `test/statement_self_visibility.sh` (#1341), every check by t
 | test | what it holds |
 | --- | --- |
 | `test_a_statement_does_not_see_its_own_writes` | the four shapes run to completion and answer as heap does, and the mid-statement flush |
+
+## 120. test_maintenance_rollback.py: a maintenance function that rolls back leaves the table as it was
+
+The pytest twin of `test/maintenance_rollback.sh` (#1341), every check by the shell's name. `compact_rewrite`, `recluster`, `compact`, `vacuum` and `vacuum_sorted` each retire row groups, and most write new ones. Each runs inside a transaction on a table with row groups of 1000 rows, two rows in five deleted, and one group deleted whole. Its effect on the row groups is read inside the transaction, and the transaction rolls back. The table must then hold the same rows by content and the same row groups, and an index scan must agree. The same then runs under a savepoint, later writes commit, and every function runs for real. The rollback is issued as SQL statements, because `pgc_conn` is a watching wrapper and an autocommit flag set on it does not reach the connection.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_maintenance_function_that_rolls_back_leaves_the_table_as_it_was` | each function's effect inside its transaction, the table after each rollback by scan and by index, the savepoint case, and the real runs |

@@ -2445,4 +2445,18 @@ suites_not_covered 230
 #     never         2282 + 9 = 2291
 #     dated          739 + 8 = 747
 #     2291 + 747 == 3038
-checks_never_observed_red 2291
+#
+# #1341, a maintenance function that rolls back leaves the table as it was
+# (jdatcmd): 2291 -> 2302. maintenance_rollback enters with all 13 checks from
+# five-major runs (13/13 on each of 15-19). Each function now runs on a fresh table
+# (OffgridwithJD, review of #1419), so each date was observed on its own arm. Two
+# are dated on PG17 by free space reused whatever its freeing xid: compact_rewrite's
+# rollback, whose freed bytes the rewrite overwrote, and the savepoint arm. The other
+# eleven arrive never, including the other four functions' arms, which that mutant
+# does not reach.
+#
+#     ledger rows   3038 + 13 = 3051
+#     never         2291 + 11 = 2302
+#     dated          747 + 2 = 749
+#     2302 + 749 == 3051
+checks_never_observed_red 2302
