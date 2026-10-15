@@ -51,8 +51,9 @@ pub="$(server_rows public)"
 # the server's rows for the settings the reference documents, to compare field by field
 srv_docd="$(LC_ALL=C join -t'|' -o 2.1,2.2,2.3 <(cut -d'|' -f1 <<<"$docd") <(cat <<<"$srv"))"
 
-check_num "the reference documents at least thirty settings, so the comparisons below read something" \
-	"$([ "$(grep -c . <<<"$docd")" -ge 30 ] && echo 1 || echo 0)" "1"
+_ndoc="$(grep -c . <<<"$docd")"
+check "the reference documents at least thirty settings, so the comparisons below read something" \
+	"$([ "$_ndoc" -ge 30 ] && echo yes || echo "no ($_ndoc rows parsed from $DOC)")" "yes"
 check "every setting the server defines is documented, the developer hooks aside" \
 	"$(LC_ALL=C comm -13 <(cut -d'|' -f1 <<<"$docd") <(cut -d'|' -f1 <<<"$pub") | listed)" "none"
 check "every documented setting exists on the server" \
@@ -80,7 +81,7 @@ check "and a superuser can" \
 # ---- compression_level reaches what zstd stores (item 83) ---------------------------
 # The same rows written at level 1 and at level 19: zstd's higher level must store
 # less. A build without zstd cannot run this.
-if ! q "SELECT enumvals FROM pg_settings WHERE name = 'pgcolumnar.compression'" | grep -q zstd; then
+if [ "$(q "SELECT 'zstd' = ANY (enumvals) FROM pg_settings WHERE name = 'pgcolumnar.compression'")" != t ]; then
 	pgc_skip zstd "this build has no zstd codec"
 fi
 for lvl in 1 19; do
