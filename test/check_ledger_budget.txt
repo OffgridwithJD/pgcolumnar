@@ -2508,4 +2508,18 @@ suites_not_covered 230
 #     never         2319 + 19 = 2338
 #     dated          759 + 5 = 764
 #     2338 + 764 == 3102
-checks_never_observed_red 2338
+#
+# #1341 item 2, SERIALIZABLE refuses a write skew on a columnar table (jdatcmd):
+# 2338 -> 2344. serializable enters with all 9 checks from five-major runs (9/9 on
+# each of 15-19). Three are dated on PG17 by one mutant: PgColumnarCatalogSnapshot
+# returning a SNAPSHOT_SELF copy. Heap SSI then takes no SIRead locks on the
+# catalog (0/0), and both doctors go off call. The other six arrive never: two
+# premises, the two empty-ward skews, which that mutant did not redden (they are
+# protected through the storage row; OffgridwithJD, review of #1424), and the two
+# REPEATABLE READ controls from that review.
+#
+#     ledger rows   3102 + 9 = 3111
+#     never         2338 + 6 = 2344
+#     dated          764 + 3 = 767
+#     2344 + 767 == 3111
+checks_never_observed_red 2344

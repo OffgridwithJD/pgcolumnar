@@ -2737,6 +2737,15 @@ rollup	rollup	the rollup to be dumped folds its source	15;16;17;18;19	never	-
 rollup	rollup	the second refresh of the NULL-key rollup folded the append	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	the zone rollups hold a row per key of the recompute	15;16;17;18;19	2026-10-13	refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	two refreshes started together fold the new rows once between them	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup without the self-conflicting lock;row_tid mapping 290 rows a block instead of the AM's
+serializable	serializable	a serializable read of a columnar table holds SIRead locks on columnar's row_group and delete_vector catalog	15;16;17;18;19	2026-10-15	PgColumnarCatalogSnapshot returns a SNAPSHOT_SELF copy, so a serializable read takes no SIRead lock on columnar's catalog
+serializable	serializable	at REPEATABLE READ both doctors' transactions commit and no one stays on call, in one row group and in two, as on heap	15;16;17;18;19	never	-
+serializable	serializable	at REPEATABLE READ both ward transactions commit and two are on call, by a scan and by an index, as on heap	15;16;17;18;19	never	-
+serializable	serializable	premise: the second doctors table holds its two rows in two row groups, the first in one	15;16;17;18;19	never	-
+serializable	serializable	premise: the ward lookup is an index scan on both tables	15;16;17;18;19	never	-
+serializable	serializable	the same when both read the ward through an index	15;16;17;18;19	never	-
+serializable	serializable	the same with the two doctors in two row groups	15;16;17;18;19	2026-10-15	PgColumnarCatalogSnapshot returns a SNAPSHOT_SELF copy, so a serializable read takes no SIRead lock on columnar's catalog
+serializable	serializable	two doctors in one row group each taken off call: SSI refuses one of the two with 40001, and one stays on call, as on heap	15;16;17;18;19	2026-10-15	PgColumnarCatalogSnapshot returns a SNAPSHOT_SELF copy, so a serializable read takes no SIRead lock on columnar's catalog
+serializable	serializable	two sessions that each see an empty ward by a scan of the whole table and each put someone on call: SSI refuses one of the two with 40001, as on heap	15;16;17;18;19	never	-
 server_file_privilege	server_file_privilege	coverage check found the file functions (not an empty scan)	15;16;17;18;19	never	-
 server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: file_split_offsets	15;16;17;18;19	never	-
 server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_current_snapshot	15;16;17;18;19	never	-

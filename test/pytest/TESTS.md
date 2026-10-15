@@ -169,6 +169,7 @@ behaviour, the source of that number is named.
 - [121. test_partition_rows.py: rows cross columnar partitions, and keys hold through the parent](#121-test_partition_rowspy-rows-cross-columnar-partitions-and-keys-hold-through-the-parent)
 - [122. test_prepared_across_sessions.py: a prepared transaction, seen from other sessions and across a crash](#122-test_prepared_across_sessionspy-a-prepared-transaction-seen-from-other-sessions-and-across-a-crash)
 - [123. test_maintenance_crash.py: a crash part-way through maintenance loses nothing](#123-test_maintenance_crashpy-a-crash-part-way-through-maintenance-loses-nothing)
+- [124. test_serializable.py: SERIALIZABLE refuses a write skew on a columnar table](#124-test_serializablepy-serializable-refuses-a-write-skew-on-a-columnar-table)
 
 ## 1. How to read a test in here
 
@@ -7066,3 +7067,13 @@ The pytest twin of `test/maintenance_crash.sh` (#1341), every check by the shell
 | test | what it holds |
 | --- | --- |
 | `test_a_crash_part_way_through_maintenance_loses_nothing` | for each function, the uncommitted crash and the committed crash, each with its recovery logged |
+
+## 124. test_serializable.py: SERIALIZABLE refuses a write skew on a columnar table
+
+The pytest twin of `test/serializable.sh` (#1341), every check by the shell's name. Two serializable transactions each read what the other is about to change, then each write; SSI must refuse the second with 40001 ("read/write dependencies") and the invariant must hold, on a columnar table as on heap. Each error is tagged with its step: columnar raises at the second write, which waits for the first commit, and heap at the second COMMIT, so the checks hold the refusal, not the step. At REPEATABLE READ the same interleavings must commit both transactions, on both tables, so a 40001 from anything but SSI cannot pass. Four shapes: two doctors taken off call in one row group and in two, and someone put on call in an empty ward after a scan of the whole table and after an index scan. The protection comes from heap SSI on pgColumnar's catalog tables, and an arm pins the SIRead locks a serializable read takes on `row_group` and `delete_vector`. The second write runs in a thread, because on columnar a write to a row group another session is changing waits for that session to commit.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_serializable_refuses_a_write_skew` | the catalog SIRead locks, the four write skews refused by SSI with 40001 against heap, and the REPEATABLE READ controls |

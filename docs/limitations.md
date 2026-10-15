@@ -614,6 +614,14 @@ same way as a `CREATE INDEX` that is not concurrent. Turn projection scans off w
   reason, two multi-statement transactions can rarely deadlock, even on disjoint
   rows. This happens when their bucketed locks collide in opposite statement order.
   Retry resolves it, as with any serialization failure.
+- `SERIALIZABLE` works on columnar tables: a write skew between two serializable
+  transactions fails one of them with `serialization_failure` (40001), as on a
+  heap. The access method takes no predicate locks of its own. The protection comes
+  from PostgreSQL's serializable isolation on pgColumnar's own catalog tables, which
+  every read of a columnar table consults and every write changes.
+  `test/serializable.sh` covers two shapes. In one, each transaction updates a row,
+  in the same row group or in different ones. In the other, each inserts a row after
+  a scan of the whole table or an index scan.
 - Concurrent inserts of the same unique key go in sequence. The server therefore
   always finds the conflict. Before a new row reaches the uniqueness check, the
   access method takes an advisory lock with the scope of the transaction. The key

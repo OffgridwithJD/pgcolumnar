@@ -298,6 +298,7 @@ SUITES=(
 	row_triggers
 	scan_decode_cost
 	scan_direction
+	serializable
 	server_file_privilege
 	settings_reference
 	smoke
