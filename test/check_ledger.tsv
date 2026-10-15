@@ -1,3 +1,20 @@
+advisory_lock_class	advisory_lock_class	a bulk UPDATE of 200000 rows holds one row-identity lock per bucket, row_lock_buckets of them	15;16;17;18;19	2026-10-15	columnar_row_lock.c: the row-identity bucket taken as the key mod 4294967291, not mod row_lock_buckets (one lock per row)
+advisory_lock_class	advisory_lock_class	a duplicate key is still rejected	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	a user advisory lock on that tag does not block a columnar insert	15;16;17;18;19	2026-10-15	PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY 103 changed to 2, the #430 defect (src/columnar.h)
+advisory_lock_class	advisory_lock_class	a user advisory lock on those tags does not block a columnar UPDATE	15;16;17;18;19	2026-10-15	PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY 104 changed to 2, the class SQL's two-int4 form produces (src/columnar.h)
+advisory_lock_class	advisory_lock_class	an UPDATE holds a row-identity lock (class 104) while enable_row_update_lock is on	15;16;17;18;19	2026-10-15	PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY 104 changed to 2, the class SQL's two-int4 form produces (src/columnar.h)
+advisory_lock_class	advisory_lock_class	and holds none with enable_row_update_lock off	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	and the UPDATE committed every row	15;16;17;18;19	2026-10-15	columnar_row_lock.c: the row-identity bucket taken as the key mod 4294967291, not mod row_lock_buckets (one lock per row)
+advisory_lock_class	advisory_lock_class	premise: the discovering session is gone and holds nothing	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	premise: the insert took an advisory lock we can see	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	premise: the lock is enabled, or nothing below proves anything	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	premise: the other session holds every one of those tags through the SQL functions	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	premise: the other session really holds that exact tag in class 2	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	premise: the second first write waited on the first	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	row_lock_buckets is fixed at server start, so a session cannot change it (55P02)	15;16;17;18;19	never	-
+advisory_lock_class	advisory_lock_class	the lock an insert takes is not in a SQL-reachable class	15;16;17;18;19	2026-10-15	PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY 103 changed to 2, the #430 defect (src/columnar.h)
+advisory_lock_class	advisory_lock_class	the locks an UPDATE takes are not in a SQL-reachable class	15;16;17;18;19	2026-10-15	PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY 104 changed to 2, the class SQL's two-int4 form produces (src/columnar.h)
+advisory_lock_class	advisory_lock_class	with bulk_parallel_writer set by hand, a second first write waits for the first and both rows land	15;16;17;18;19	2026-10-15	the storage-row creation lock skipped whenever bulk_parallel_writer is on, not only once the row is committed (src/columnar_metadata.c)
 alter_table_scans	alter_table_scans	ADD COLUMN with a volatile default rewrites the table, as on heap	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
 alter_table_scans	alter_table_scans	ADD PRIMARY KEY is refused over a duplicate (23505), as on heap	15;16;17;18;19	never	-
 alter_table_scans	alter_table_scans	ADD PRIMARY KEY succeeds once the duplicate is deleted, as on heap	15;16;17;18;19	2026-10-15	the index build marks every row alive, deleted ones included (src/columnar_tableam.c)

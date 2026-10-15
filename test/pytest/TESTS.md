@@ -5397,7 +5397,9 @@ regardless.
 | `test_the_lock_an_insert_takes_is_not_in_a_sql_reachable_class` | the lock is enabled, the insert's locks are visible, none is SQL-reachable, and the discovering session leaves nothing held |
 | `test_a_user_advisory_lock_on_that_tag_does_not_block_an_insert` | a user session holding every addressable tag in class 2 does not block a columnar insert |
 | `test_a_duplicate_key_is_still_rejected` | the lock still does its job, so removing the collision by removing the lock does not pass |
-| `test_the_row_identity_lock_and_its_settings` | an UPDATE holds a class-104 row-identity lock with `enable_row_update_lock` on and none with it off; `row_lock_buckets` refuses `SET` (55P02) because it is fixed at server start (#1341) |
+| `test_the_row_identity_lock_and_its_settings` | an UPDATE holds a class-104 row-identity lock with `enable_row_update_lock` on and none with it off; `row_lock_buckets` refuses `SET` (55P02) because it is fixed at server start; a 200000-row UPDATE holds `row_lock_buckets` class-104 locks, one per bucket, not one per row (#1341 item 16) |
+| `test_the_row_identity_lock_cannot_be_reached_from_sql` | every advisory lock an open UPDATE holds is outside field4 1 and 2, and a second session holding each of those tags through `pg_advisory_xact_lock(int4, int4)` does not block an UPDATE of the same row (#1341 item 56) |
+| `test_bulk_parallel_writer_set_by_hand_still_serialises_a_first_write` | two sessions with `bulk_parallel_writer` on each make the first write to a committed, empty table; the second waits for the first, and both rows land (#1341 item 55) |
 ## 69. test_index_am_support.py: the index methods the page claims must work
 
 `docs/features.md` said "`CREATE INDEX` builds btree and hash indexes over a
