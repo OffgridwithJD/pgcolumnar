@@ -6812,6 +6812,7 @@ Independent of the shell suite: its own values (`c`, `Q`, `x`, `q` against the s
 | test | what it holds |
 | --- | --- |
 | `test_a_collation_change_without_a_rewrite` | after the change, columnar answers as heap does for: `min`/`max`, a range, an equality, rows written afterwards, a columnar partition reached through its parent, a `vacuum_sorted` table under `ORDER BY ... LIMIT`, and a projection sorted on the column. The extent is never the old collation's bound. The relfilenode is unchanged (premise) |
+| `test_a_type_change_without_a_rewrite` | after int4 to oid, a binary-coercible change that keeps the relfilenode, columnar answers as heap does for `min`/`max`, a range above every int4 value and an equality on a value that was negative; the extent is not int4's bound; a table sorted on the column and a projection sorted on it answer as heap does (#1341 item 19) |
 
 ## 104. test_build_needs_pg_config.py: a build with no pg_config refuses, it does not wait on stdin
 

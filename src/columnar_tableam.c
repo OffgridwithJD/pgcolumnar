@@ -3293,6 +3293,16 @@ pgcolumnar_reject_drop_projected_column(AlterTableStmt *stmt)
  * relfilenode was not rewritten, and any column whose collation differs has its
  * ordering forgotten (PgColumnarForgetColumnOrdering). A rewritten relation
  * wrote new zone maps under the new collation and needs nothing.
+ *
+ * A TYPE CHANGE THAT REWRITES NOTHING orders differently too (#1341 item 19).
+ * int4 to oid is binary-coercible, so PostgreSQL relabels the column and keeps
+ * the relfilenode, and oid orders unsigned: -5 is 4294967291. The zone maps, the
+ * extent and a projection's zone maps held int4's bounds, and WHERE c > 3000000000
+ * pruned every group heap answered from. So each column's type is recorded beside
+ * its collation, and a change in either forgets the ordering. A table sorted on
+ * such a column (vacuum_sorted, #751) is in the old order too: its claim to the
+ * planner names the key by column, not by type, so the recorded kind is cleared,
+ * which the planner already reads as "order unknown" and refuses.
  */
 typedef struct PgColumnarCollationsBefore
 {
@@ -3300,20 +3310,22 @@ typedef struct PgColumnarCollationsBefore
 	Oid			relfilenode;
 	int			natts;
 	Oid		   *collations;		/* by attnum - 1 */
+	Oid		   *types;			/* by attnum - 1: atttypid (#1341 item 19) */
 } PgColumnarCollationsBefore;
 
-static Oid
-pgcolumnar_attcollation(Oid relid, AttrNumber attnum)
+static void
+pgcolumnar_attcollation_and_type(Oid relid, AttrNumber attnum, Oid *coll, Oid *type)
 {
 	HeapTuple	tp = SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum));
-	Oid			coll = InvalidOid;
 
+	*coll = InvalidOid;
+	*type = InvalidOid;
 	if (HeapTupleIsValid(tp))
 	{
-		coll = ((Form_pg_attribute) GETSTRUCT(tp))->attcollation;
+		*coll = ((Form_pg_attribute) GETSTRUCT(tp))->attcollation;
+		*type = ((Form_pg_attribute) GETSTRUCT(tp))->atttypid;
 		ReleaseSysCache(tp);
 	}
-	return coll;
 }
 
 static List *
@@ -3354,11 +3366,37 @@ pgcolumnar_collations_before(AlterTableStmt *stmt)
 		b->natts = cls->relnatts;
 		ReleaseSysCache(tp);
 		b->collations = palloc0(sizeof(Oid) * Max(b->natts, 1));
+		b->types = palloc0(sizeof(Oid) * Max(b->natts, 1));
 		for (a = 1; a <= b->natts; a++)
-			b->collations[a - 1] = pgcolumnar_attcollation(r, a);
+			pgcolumnar_attcollation_and_type(r, a, &b->collations[a - 1], &b->types[a - 1]);
 		out = lappend(out, b);
 	}
 	return out;
+}
+
+/*
+ * A table sorted on a column whose type changed in place is in the old type's
+ * order (#1341 item 19). The run and key stay; the kind is cleared, so the
+ * planner's sorted pathkeys (pgcolumnar_sorted_pathkeys, condition 1) refuse it.
+ */
+static void
+pgcolumnar_forget_sorted_claim(uint64 storageId, const char *column)
+{
+	int64		first;
+	int64		last;
+	List	   *names;
+	char	   *kind;
+	ListCell   *lc;
+
+	PgColumnarGetSortedInfo(storageId, &first, &last, &names, &kind);
+	if (kind == NULL)
+		return;
+	foreach(lc, names)
+		if (strcmp((char *) lfirst(lc), column) == 0)
+		{
+			PgColumnarSetSortedExtent(storageId, first, last, names, NULL);
+			return;
+		}
 }
 
 static void
@@ -3390,9 +3428,13 @@ pgcolumnar_forget_changed_collations(List *before)
 
 			ListCell   *pc;
 
-			if (att->attisdropped || att->attcollation == b->collations[a - 1])
+			if (att->attisdropped ||
+				(att->attcollation == b->collations[a - 1] &&
+				 att->atttypid == b->types[a - 1]))
 				continue;
 			PgColumnarForgetColumnOrdering(storageId, a - 1);
+			if (att->atttypid != b->types[a - 1])
+				pgcolumnar_forget_sorted_claim(storageId, NameStr(att->attname));
 
 			/*
 			 * A projection stores the column in its own storage, with zone maps
