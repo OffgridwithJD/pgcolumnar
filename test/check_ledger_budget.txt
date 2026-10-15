@@ -2243,4 +2243,17 @@ suites_not_covered 234
 #     never         2087 +  6 = 2093
 #     dated          665 +  8 = 673
 #     2093 + 673 == 2766
-checks_never_observed_red 2093
+#
+# #1341 item 19, a type change that rewrites nothing (int4 to oid) forgets the
+# column's ordering and the sorted claim: 2093 -> 2095. collation_change gains 8
+# checks from five-major runs (20/20 on each of 15-19). Six are dated on PG17:
+#   - the tree before the fix (the ALTER hook compares collations only): min/max,
+#     the range, the equality, the extent, the sorted and the projection arms;
+#   - the fix without clearing the sorted kind: the sorted arm alone.
+# The two premises (row groups, no rewrite) arrive never.
+#
+#     ledger rows   2766 + 8 = 2774
+#     never         2093 + 2 = 2095
+#     dated          673 + 6 = 679
+#     2095 + 679 == 2774
+checks_never_observed_red 2095
