@@ -319,6 +319,27 @@ ov_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postg
 check "avg(float8) overflow errors like core" \
 	"$(grep -qi 'out of range' <<<"$ov_out" && echo yes || echo no)" yes
 
+# sum overflow parity (#1341 item 50): two finite float8s, or two finite reals, whose
+# sum is infinite raise "value out of range: overflow" (22003) in core's float8pl and
+# float4pl. The node's accumulators must raise it too rather than return Infinity.
+# Judged by SQLSTATE, against core with the node turned off.
+psql_run "DROP TABLE IF EXISTS ovs_col;
+          CREATE TABLE ovs_col (k int, d float8, r real) USING pgcolumnar;
+          INSERT INTO ovs_col VALUES (1, 1e308, 3e38), (1, 1e308, 3e38);" >/dev/null
+gv_state() {	# gv_state on|off QUERY -> ok, or the SQLSTATE the query raised
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
+		-c "SET pgcolumnar.enable_group_vectorization = $1;" -c "$2" 2>&1 >/dev/null)"
+	[ -z "$out" ] && { echo ok; return; }
+	sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1
+}
+check "sum(float8) and sum(real) overflow: node fires" \
+	"$(pgc_is_groupvec "SELECT k, sum(d) FROM ovs_col GROUP BY k")|$(pgc_is_groupvec "SELECT k, sum(r) FROM ovs_col GROUP BY k")" "yes|yes"
+check "sum(float8) and sum(real) overflow raise 22003, as core does" \
+	"$(gv_state on "SELECT k, sum(d) FROM ovs_col GROUP BY k")|$(gv_state on "SELECT k, sum(r) FROM ovs_col GROUP BY k")|$(gv_state off "SELECT k, sum(d) FROM ovs_col GROUP BY k")|$(gv_state off "SELECT k, sum(r) FROM ovs_col GROUP BY k")" \
+	"22003|22003|22003|22003"
+
 # ---- 8. degenerate inputs --------------------------------------------------
 
 diff_query "oracle exact: all rows filtered out -> 0 groups" \

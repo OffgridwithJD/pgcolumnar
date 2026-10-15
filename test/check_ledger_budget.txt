@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 232
+suites_not_covered 231
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2296,4 +2296,15 @@ suites_not_covered 232
 #     never         2095 + 84 = 2179
 #     dated          691 +  3 =  694
 #     2179 + 694 == 2873
-checks_never_observed_red 2179
+#
+# #1341 item 50, the grouped node's float sums raise on overflow (jdatcmd): 2179 ->
+# 2272, and suites_not_covered 232 -> 231. native_groupagg had no rows; it enters
+# with all 94 checks from five-major runs (94/94 on each of 15-19). The new sum arm
+# is dated by the node's float8 sum without its overflow check; the other 93 arrive
+# never: seeding a suite moves the census up by its undated rows.
+#
+#     ledger rows   2873 + 94 = 2967
+#     never         2179 + 93 = 2272
+#     dated          694 + 1 = 695
+#     2272 + 695 == 2967
+checks_never_observed_red 2272
