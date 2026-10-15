@@ -45,6 +45,10 @@ server_rows() {
 listed() {	# stdin lines -> one space-separated line, or "none" when there are none
 	local x; x="$(tr '\n' ' ' | sed 's/ *$//')"; echo "${x:-none}"
 }
+# comm compares WHOLE lines, so each side of a two-field comparison is sorted again
+# after its cut: rows sorted on the name alone put `autovacuum|` after
+# `autovacuum_compact_threshold|` in C order, and comm then pairs the wrong lines
+# and names settings that are correct (OffgridwithJD, review of #1414).
 docd="$(doc_rows)"
 srv="$(server_rows)"
 pub="$(server_rows public)"
@@ -59,9 +63,9 @@ check "every setting the server defines is documented, the developer hooks aside
 check "every documented setting exists on the server" \
 	"$(LC_ALL=C comm -23 <(cut -d'|' -f1 <<<"$docd") <(cut -d'|' -f1 <<<"$srv") | listed)" "none"
 check "each documented default is the server's" \
-	"$(LC_ALL=C comm -3 <(cut -d'|' -f1,2 <<<"$docd") <(cut -d'|' -f1,2 <<<"$srv_docd") | tr -d '\t' | listed)" "none"
+	"$(LC_ALL=C comm -3 <(cut -d'|' -f1,2 <<<"$docd" | LC_ALL=C sort) <(cut -d'|' -f1,2 <<<"$srv_docd" | LC_ALL=C sort) | tr -d '\t' | listed)" "none"
 check "each documented condition is the server's context for the setting" \
-	"$(LC_ALL=C comm -3 <(cut -d'|' -f1,3 <<<"$docd") <(cut -d'|' -f1,3 <<<"$srv_docd") | tr -d '\t' | listed)" "none"
+	"$(LC_ALL=C comm -3 <(cut -d'|' -f1,3 <<<"$docd" | LC_ALL=C sort) <(cut -d'|' -f1,3 <<<"$srv_docd" | LC_ALL=C sort) | tr -d '\t' | listed)" "none"
 
 # ---- enable_end_truncation needs superuser (item 57) -------------------------------
 psql_run "DROP ROLE IF EXISTS sr_plain; CREATE ROLE sr_plain LOGIN NOSUPERUSER;"
