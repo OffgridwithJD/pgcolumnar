@@ -418,3 +418,31 @@ def test_an_index_built_after_a_delete_serves_an_older_snapshot(pgc_cluster, pgc
         five = cur.fetchone()[0]
         cur.execute("RESET enable_seqscan")
     expect.text(f"{built}|{five}", "ok|1", "a unique index builds over a key whose other holder is a deleted row")
+
+
+def test_reindex_reclaims_the_entries_of_rows_no_snapshot_sees(pgc_conn, expect):
+    """An index build holds deleted rows only while some snapshot can still see them
+    (#1407). It held every deleted row, so REINDEX, documented as what reclaims stale
+    entries, reclaimed none: 9 rows in 10 deleted, and the rebuilt index kept its size
+    where heap's shrank to a tenth. Heap is run alongside as the control."""
+    with pgc_conn.cursor() as cur:
+        for am in ("pgcolumnar", "heap"):
+            cur.execute(f"CREATE TABLE ix_{am} (a int) USING {am}")
+            cur.execute(f"INSERT INTO ix_{am} SELECT g FROM generate_series(1, 100000) g")
+            cur.execute(f"CREATE INDEX ix_{am}_a ON ix_{am} (a)")
+            cur.execute(f"DELETE FROM ix_{am} WHERE a % 10 <> 0")
+
+    def reclaim(am):
+        before = _one(pgc_conn, f"SELECT pg_relation_size('ix_{am}_a')")
+        with pgc_conn.cursor() as cur:
+            cur.execute(f"REINDEX INDEX ix_{am}_a")
+        after = _one(pgc_conn, f"SELECT pg_relation_size('ix_{am}_a')")
+        return "reclaimed" if after < before // 2 else f"kept:{before}->{after}"
+
+    with pgc_conn.cursor() as cur:
+        col, heap = reclaim("pgcolumnar"), reclaim("heap")
+        cur.execute("SET enable_seqscan = off")
+        found = _one(pgc_conn, "SELECT count(*) FROM ix_pgcolumnar WHERE a > 0")
+        cur.execute("RESET enable_seqscan")
+    expect.text(f"{col}|{heap}|{found}", "reclaimed|reclaimed|10000",
+                "REINDEX after a committed delete of most rows reclaims their entries, as heap's does")

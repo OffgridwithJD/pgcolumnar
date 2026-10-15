@@ -32,6 +32,7 @@
 #include "catalog/storage.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "storage/procarray.h"
 #include "commands/trigger.h"
 #include "catalog/dependency.h"
 #include "access/htup_details.h"
@@ -2419,6 +2420,8 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 								IndexBuildCallback callback, void *callback_state,
 								TableScanDesc scan)
 {
+	SnapshotData deadHorizon;
+	Snapshot	deadHorizonReg;
 	PgColumnarReadState *readState;
 	bool		ownReadState;
 	Bitmapset  *projected;
@@ -2548,6 +2551,24 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	PgColumnarReadSetEmitDeleted(readState, true);
 
 	/*
+	 * BUT NOT A ROW DEAD TO EVERY TRANSACTION (#1407). The horizon sees exactly the
+	 * transactions committed before every running snapshot began, so a row deleted
+	 * under it is one no snapshot can see, and heap's build skips the like. With
+	 * every deleted row indexed, REINDEX -- documented as what reclaims stale
+	 * entries -- reclaimed none: 9 rows in 10 deleted, and the rebuilt index kept
+	 * its size where heap's shrank to a tenth. curcid 0 keeps this transaction's
+	 * own writes out of it; a row it deleted is not dead to all anyway.
+	 */
+	memset(&deadHorizon, 0, sizeof(deadHorizon));
+	deadHorizon.snapshot_type = SNAPSHOT_MVCC;
+	deadHorizon.xmin = GetOldestNonRemovableTransactionId(table_rel);
+	deadHorizon.xmax = deadHorizon.xmin;
+	deadHorizon.curcid = FirstCommandId;
+	/* registered: a visibility check asserts it (PG 18+), and the copy outlives this frame */
+	deadHorizonReg = RegisterSnapshot(&deadHorizon);
+	PgColumnarReadSetDeadHorizon(readState, deadHorizonReg);
+
+	/*
 	 * Say which branch ran and how wide the reader it produced will actually
 	 * read, so a test can assert the projection NARROWED rather than infer it
 	 * from a stopwatch. A fix that silently did nothing would pass every
@@ -2624,6 +2645,7 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	 */
 	if (scan != NULL)
 		table_endscan(scan);
+	UnregisterSnapshot(deadHorizonReg);
 
 	return reltuples;
 }

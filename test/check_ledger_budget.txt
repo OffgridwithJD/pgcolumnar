@@ -2307,4 +2307,14 @@ suites_not_covered 231
 #     never         2179 + 93 = 2272
 #     dated          694 + 1 = 695
 #     2272 + 695 == 2967
+#
+# #1407, REINDEX reclaims the entries of rows no snapshot sees (jdatcmd): 2272 ->
+# 2272. am_contracts gains one check from five-major runs (28/28 on each of 15-19),
+#     dated          695 + 1 = 696
+# its size where heap's shrank to a tenth.
+#
+#     ledger rows   2967 + 1 = 2968
+#     never         2272 + 0 = 2272
+#     dated          695 + 1 = 696
+#     2272 + 696 == 2968
 checks_never_observed_red 2272
