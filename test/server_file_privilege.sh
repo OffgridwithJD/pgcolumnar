@@ -66,6 +66,9 @@ psql_run "GRANT SELECT, INSERT ON imp_target TO t_priv;"
 psql_run "CREATE SERVER pqsrv FOREIGN DATA WRAPPER pgcolumnar_parquet;"
 psql_run "CREATE FOREIGN TABLE ft (id int, v text) SERVER pqsrv OPTIONS (path '$nope');"
 psql_run "GRANT SELECT ON ft TO t_none, t_priv;"
+psql_run "CREATE SERVER icesrv FOREIGN DATA WRAPPER pgcolumnar_iceberg;"
+psql_run "CREATE FOREIGN TABLE ift (id bigint) SERVER icesrv OPTIONS (metadata_path '$nope');"
+psql_run "GRANT SELECT ON ift TO t_none, t_priv;"
 
 # tier_partition (#1295) writes its file through export_parquet, so its gate is
 # export_parquet's. To reach it a role needs SELECT and, for the SHARE lock the
@@ -100,6 +103,14 @@ entry_points=(
 	"export_arrow|write|SELECT pgcolumnar.export_arrow('imp_target'::regclass, '$out.arrow')"
 	"parallel_export_parquet|write|SELECT pgcolumnar.parallel_export_parquet('imp_target'::regclass, '$outdir', 2)"
 	"tier_partition|write|SELECT pgcolumnar.tier_partition('sfp_p1'::regclass, 'pqsrv', '$out.parquet')"
+	# The REST catalog readers (#388 phase 7) and the Iceberg wrapper's scan carry the
+	# same read gate (#1341 items 8 and 52). A URL nothing listens on: the privileged
+	# role gets past the gate and fails on the connection, without naming the role.
+	"iceberg_rest_table_location|read|SELECT pgcolumnar.iceberg_rest_table_location('http://127.0.0.1:1', 'db', 't')"
+	"iceberg_rest_scan|read|SELECT * FROM pgcolumnar.iceberg_rest_scan('http://127.0.0.1:1', 'db', 't') AS t(id bigint)"
+	"iceberg_rest_namespaces|read|SELECT * FROM pgcolumnar.iceberg_rest_namespaces('http://127.0.0.1:1')"
+	"iceberg_rest_tables|read|SELECT * FROM pgcolumnar.iceberg_rest_tables('http://127.0.0.1:1', 'db')"
+	"iceberg_fdw_scan|read|SELECT * FROM ift"
 )
 
 declare -A listed

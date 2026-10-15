@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 234
+suites_not_covered 232
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -2282,4 +2282,18 @@ suites_not_covered 234
 #     never         2095     = 2095
 #     dated          688 + 3 =  691
 #     2095 + 691 == 2786
-checks_never_observed_red 2095
+#
+# #1341 items 8, 9, 14 and 52, the Iceberg REST privilege gates (jdatcmd): 2095 ->
+# 2179, and suites_not_covered 234 -> 232. server_file_privilege and
+# iceberg_rest_server had no rows; they enter with all their checks from five-major
+# runs (58/58 and 29/29 on each of 15-19). Three are dated: the REST read gate by
+# iceberg_rest_table_location without it, the environment-token refusal by the
+# resolver letting every role borrow the token, and the credentials_required arm by
+# the validator letting a non-superuser set it false. The other 84 arrive never:
+# seeding a suite moves the census up by its undated rows.
+#
+#     ledger rows   2786 + 87 = 2873
+#     never         2095 + 84 = 2179
+#     dated          691 +  3 =  694
+#     2179 + 694 == 2873
+checks_never_observed_red 2179

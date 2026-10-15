@@ -227,5 +227,33 @@ check "the catalog-URI form still works with the env token" \
 	"$(q "SELECT pgcolumnar.iceberg_rest_table_location('$CAT','db','events')")" \
 	"$MDLOC"
 
+# ---- a non-superuser does not borrow the server's environment token (#1341 items 9, 14)
+# The environment token is the postmaster's ambient identity: only a superuser, or a
+# mapping a superuser marked credentials_required 'false', may use it. ice_r holds
+# every other grant the call needs, so the missing token mapping is all that refuses
+# it, and the refusal comes before any request reaches the catalog.
+q "CREATE ROLE ice_r LOGIN NOSUPERUSER; GRANT pg_read_server_files TO ice_r;
+   GRANT USAGE ON SCHEMA pgcolumnar TO ice_r; GRANT USAGE ON FOREIGN SERVER cat TO ice_r;" >/dev/null
+as_ice_r() {	# as_ice_r SQL -> the single value, or the SQLSTATE it fails with, or noconnect
+	local out rc st
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U ice_r -d "$PGC_DB" \
+		-X -qtA -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "$1" 2>&1)"
+	rc=$?
+	st="$(sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1)"
+	if [ -n "$st" ]; then echo "$st"
+	elif [ "$rc" = 0 ]; then v="$(printf '%s\n' "$out" | tail -1)"; echo "${v:-ok}"
+	else echo noconnect; fi
+}
+before="$(wc -l < "$REST_LOG")"
+check "a non-superuser with no token mapping is refused (28000) despite the environment token, before any request" \
+	"$(as_ice_r "SELECT pgcolumnar.iceberg_rest_table_location('cat','db','events')")|$(( $(wc -l < "$REST_LOG") - before ))" \
+	"28000|0"
+q "CREATE USER MAPPING FOR ice_r SERVER cat" >/dev/null
+check "and it cannot mark its own mapping credentials_required false (42501)" \
+	"$(as_ice_r "ALTER USER MAPPING FOR ice_r SERVER cat OPTIONS (ADD credentials_required 'false')")" "42501"
+q "ALTER USER MAPPING FOR ice_r SERVER cat OPTIONS (ADD credentials_required 'false')" >/dev/null
+check "control: with credentials_required false set by a superuser, the same role reads by the environment token" \
+	"$(as_ice_r "SELECT pgcolumnar.iceberg_rest_table_location('cat','db','events')")" "$MDLOC"
+
 check "backend still up" "$(q 'SELECT 1')" "1"
 pgc_summary
