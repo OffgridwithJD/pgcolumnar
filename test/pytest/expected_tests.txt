@@ -700,4 +700,6 @@ guard_tests 435
 # collection over the cluster files on this tree (stacked on #1422).
 # cluster_tests 585 -> 586 for #1341's test_maintenance_crash.py, one test, by collection
 # cluster_tests 586 -> 587 for #1341's test_serializable.py, one test, by collection
-cluster_tests 587
+# cluster_tests 587 -> 588 for #1341's daemon TimeZone test in test_autovacuum_expire.py,
+# by collection over the cluster files on this tree.
+cluster_tests 588

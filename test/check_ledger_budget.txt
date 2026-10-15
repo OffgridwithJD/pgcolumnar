@@ -2522,4 +2522,15 @@ suites_not_covered 230
 #     never         2338 + 6 = 2344
 #     dated          764 + 3 = 767
 #     2344 + 767 == 3111
-checks_never_observed_red 2344
+#
+# #1341, the daemon's TimeZone for a date retention (OffgridwithJD): 2344 -> 2345. Four
+# new autovacuum_expire checks. Three arms are dated by the daemon pinning its expire
+# to one zone: UTC (at 17:12 UTC, a day behind Kiritimati) reddens the server-zone and
+# database-zone arms; Kiritimati reddens the reload arm. The premise that the two
+# zones are on different dates arrives never. Five-major runs: 23/23 on 15-19.
+#
+#     ledger rows   3111 + 4 = 3115
+#     never         2344 + 1 = 2345
+#     dated          767 + 3 = 770
+#     2345 + 770 == 3115
+checks_never_observed_red 2345

@@ -280,3 +280,79 @@ def test_a_table_dropped_mid_pass_is_skipped_and_the_pass_goes_on(run, expect):
     expect.num(run["after_aged"], 0, "dropped: and the pass goes on to expire the next table")
     expect.text("yes" if run["gone_skipped"] >= 1 else "no", "yes",
                 "dropped: a table dropped mid-pass is logged as skipped")
+
+
+def test_the_daemon_cuts_a_date_retention_at_its_databases_time_zone(pgc_own_db, pgc_cluster, expect):
+    """Which TimeZone the daemon's expire uses for a date retention (#1341). how-to.md
+    said the server's; measured, it follows the server's, including a reloaded change,
+    and a database-level ALTER DATABASE ... SET TimeZone overrides it, as for any
+    session connecting to that database. Two zones 25 hours apart, never on the same
+    date. One row group per day, so the first surviving day IS the daemon's cutoff.
+
+    A private database, so the database-level setting reaches no other module, and every
+    setting this changes is reset before it returns: the daemon visits every database."""
+    conn = pgc_own_db
+    db = _one(conn, "SELECT current_database()")
+    touched = ("timezone", "pgcolumnar.autovacuum", "pgcolumnar.autovacuum_expire", "pgcolumnar.autovacuum_naptime")
+
+    def cut(zone):
+        return _one(conn, f"SELECT ((now() AT TIME ZONE '{zone}')::date - 1)::text")
+
+    def expire(on):
+        _reload(conn, pgcolumnar__autovacuum_expire="on" if on else "off")
+        if not on:
+            time.sleep(5)
+
+    def mk(t):
+        conn.execute(f"CREATE TABLE {t} (d date, v int) USING pgcolumnar")
+        conn.execute(f"SELECT pgcolumnar.set_options('{t}', chunk_group_row_limit => 1000,"
+                     " stripe_row_limit => 1000, ttl_column => 'd', ttl_interval => '1 day')")
+        for k in range(-6, 7):
+            conn.execute(f"INSERT INTO {t} SELECT (now() AT TIME ZONE 'UTC')::date + {k}, g"
+                         " FROM generate_series(1, 100) g")
+
+    def first(t, zone, start):
+        """'match' if the first surviving day is the zone's cutoff, read just before and
+        just after the daemon's passes (a zone's midnight may fall between)."""
+        before = cut(zone)
+        expire(True)
+        got, last, same = None, None, 0
+        for _ in range(60):
+            got = _one(conn, f"SELECT min(d)::text FROM {t}")
+            if got == last and got != start:
+                same += 1
+                if same >= 8:
+                    break
+            else:
+                same = 0
+            last = got
+            time.sleep(1)
+        after = cut(zone)
+        expire(False)
+        return "match" if got in (before, after) else f"{got} (want {before} or {after})"
+
+    try:
+        _reload(conn, pgcolumnar__autovacuum="on", pgcolumnar__autovacuum_naptime=NAP,
+                pgcolumnar__autovacuum_expire="off", timezone="'Pacific/Kiritimati'")
+        time.sleep(3)
+        mk("tz_k")
+        start = _one(conn, "SELECT min(d)::text FROM tz_k")
+        groups = _one(conn, "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('tz_k')")
+        expect.text(f"{'apart' if cut('Pacific/Kiritimati') != cut('Pacific/Pago_Pago') else 'same'}|{groups}",
+                    "apart|13", "premise: the two zones are on different dates, so every arm below can tell them apart")
+        expect.text(first("tz_k", "Pacific/Kiritimati", start), "match",
+                    "the daemon cuts a date retention at the server's TimeZone")
+        _reload(conn, timezone="'Pacific/Pago_Pago'")
+        time.sleep(3)
+        mk("tz_p")
+        expect.text(first("tz_p", "Pacific/Pago_Pago", start), "match",
+                    "and follows a change to it once the configuration is reloaded")
+        conn.execute(f'ALTER DATABASE "{db}" SET timezone = \'Pacific/Kiritimati\'')
+        mk("tz_d")
+        expect.text(first("tz_d", "Pacific/Kiritimati", start), "match",
+                    "a database-level TimeZone overrides the server's for the daemon too")
+    finally:
+        conn.execute(f'ALTER DATABASE "{db}" RESET timezone')
+        for g in touched:
+            conn.execute(f"ALTER SYSTEM RESET {g}")
+        conn.execute("SELECT pg_reload_conf()")

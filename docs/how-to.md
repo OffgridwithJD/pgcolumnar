@@ -335,9 +335,13 @@ per `pgcolumnar.autovacuum_naptime` (default 60 seconds), and logs
 any. A pass that retires nothing logs at `DEBUG1` only.
 
 For a `date` or `timestamp` retention column, the cutoff depends on the time
-zone. The daemon uses the server's `TimeZone` setting, which may differ from
-the time zone your sessions use. For a cutoff in your session's time zone, run
-`pgcolumnar.expire` by hand from that session.
+zone. The daemon uses the `TimeZone` in effect for the database it connects to.
+That is the database's own setting (`ALTER DATABASE ... SET TimeZone`) when it
+has one. Otherwise it is the server's `TimeZone`, including a change made by
+reloading the configuration. Either may differ from the time zone your sessions
+use. For a
+cutoff in your session's time zone, run `pgcolumnar.expire` by hand from that
+session.
 
 `pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
 set `ttl_interval` to a span no row will reach.
