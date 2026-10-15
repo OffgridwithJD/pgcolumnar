@@ -2328,4 +2328,20 @@ suites_not_covered 231
 #     never         2272 + 1 = 2273
 #     dated          696 + 0 = 696
 #     2273 + 696 == 2969
-checks_never_observed_red 2273
+#
+# #1341, ALTER TABLE forms that read every row see the live rows and only those
+# (jdatcmd): 2273 -> 2278. alter_table_scans enters with all 15 checks from
+# five-major runs (15/15 on each of 15-19). Ten are dated on PG17 by two mutants:
+#   - every scan returns deleted rows: the deleted-rows-gone arm, the three
+#     acceptances after the delete but ADD PRIMARY KEY's, the validated flag,
+#     and both rewrites and their row arms;
+#   - the index build marks every row alive: ADD PRIMARY KEY after the delete,
+#     and the index lookup that needs that key.
+# The other five arrive never: the three refusals before the delete, the NOT VALID
+# add, and the final lookup.
+#
+#     ledger rows   2969 + 15 = 2984
+#     never         2273 + 5 = 2278
+#     dated          696 + 10 = 706
+#     2278 + 706 == 2984
+checks_never_observed_red 2278

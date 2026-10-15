@@ -677,4 +677,6 @@ guard_tests 435
 # test_native_groupagg.py, by collection over the cluster files on this tree.
 # cluster_tests 568 -> 569 for #1407's test_reindex_reclaims_the_entries_of_rows_no_snapshot_sees in
 # test_am_contracts.py, by collection over the cluster files on this tree.
-cluster_tests 569
+# cluster_tests 569 -> 570 for #1341's test_alter_table_scans.py, one test, by collection
+# over the cluster files on this tree.
+cluster_tests 570

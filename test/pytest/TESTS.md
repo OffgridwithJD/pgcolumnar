@@ -160,6 +160,7 @@ behaviour, the source of that number is named.
 - [112. test_debug_hook_privilege.py: the debug metadata mutators are owner-only](#112-test_debug_hook_privilegepy-the-debug-metadata-mutators-are-owner-only)
 - [113. test_vacuum_lock_privilege.py: maintenance refuses a non-owner before taking its lock](#113-test_vacuum_lock_privilegepy-maintenance-refuses-a-non-owner-before-taking-its-lock)
 - [114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap](#114-test_vm_privilegepy-the-visibility-map-entry-points-are-owner-only-and-refuse-heap)
+- [115. test_alter_table_scans.py: ALTER TABLE forms see the live rows and only those](#115-test_alter_table_scanspy-alter-table-forms-see-the-live-rows-and-only-those)
 
 ## 1. How to read a test in here
 
@@ -6959,3 +6960,13 @@ The pytest twin of `test/vm_privilege.sh` (#748, ported for #1341), every check 
 | test | what it holds |
 | --- | --- |
 | `test_the_visibility_map_entry_points` | the premises, the two refusal layers and the damage they prevent, the owner controls, the heap refusals and sweep, and the coverage scan |
+
+## 115. test_alter_table_scans.py: ALTER TABLE forms see the live rows and only those
+
+The pytest twin of `test/alter_table_scans.sh` (#1341), every check by the shell's name. A columnar table keeps a deleted row in its file until compaction, so every ALTER TABLE form that reads the existing rows must see the live ones and only those. `SET NOT NULL`, `ADD PRIMARY KEY` and `VALIDATE CONSTRAINT` run on a columnar table and on heap with the same rows. First a row violates each form, and both tables refuse it with the same SQLSTATE (23502, 23505, 23514). Then that row is deleted, and both accept the form. `ALTER COLUMN TYPE` and `ADD COLUMN` with a volatile default rewrite the table: each keeps the live rows and leaves the deleted ones gone. After both rewrites the primary key still finds id 1 once, through the index.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_alter_table_forms_see_the_live_rows_and_only_those` | the three refusals and three acceptances against heap, both rewrites, and the index lookup after them |
