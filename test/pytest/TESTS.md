@@ -166,6 +166,8 @@ behaviour, the source of that number is named.
 - [118. test_recovery_minimal_wal.py: tables that skip WAL survive a crash](#118-test_recovery_minimal_walpy-tables-that-skip-wal-survive-a-crash)
 - [119. test_statement_self_visibility.py: a statement does not see its own writes](#119-test_statement_self_visibilitypy-a-statement-does-not-see-its-own-writes)
 - [120. test_maintenance_rollback.py: a maintenance function that rolls back leaves the table as it was](#120-test_maintenance_rollbackpy-a-maintenance-function-that-rolls-back-leaves-the-table-as-it-was)
+- [121. test_partition_rows.py: rows cross columnar partitions, and keys hold through the parent](#121-test_partition_rowspy-rows-cross-columnar-partitions-and-keys-hold-through-the-parent)
+- [122. test_prepared_across_sessions.py: a prepared transaction, seen from other sessions and across a crash](#122-test_prepared_across_sessionspy-a-prepared-transaction-seen-from-other-sessions-and-across-a-crash)
 
 ## 1. How to read a test in here
 
@@ -7032,3 +7034,24 @@ The pytest twin of `test/maintenance_rollback.sh` (#1341), every check by the sh
 | test | what it holds |
 | --- | --- |
 | `test_a_maintenance_function_that_rolls_back_leaves_the_table_as_it_was` | each function's effect inside its transaction, the table after each rollback by scan and by index, the savepoint case, and the real runs |
+
+## 121. test_partition_rows.py: rows cross columnar partitions, and keys hold through the parent
+
+The pytest twin of `test/partition_rows.sh` (#1341, #1421), every check by the shell's name. A parent with a PRIMARY KEY and two columnar partitions, and the same with heap partitions; heap is the answer. An `UPDATE` moves 49 rows to the other partition: each partition and the parent then hold what heap's do, and the key finds a moved row at its new key only. A duplicate key through the parent is refused (23505), a key a moved row gave up is free again, and a duplicate of a moved row's new key is refused in its new partition. Three races, ordered by a gate connection rather than by sleeps: a second insert of the same key waits and gets 23505; a second session moving the row the first is moving waits and gets 40001, which columnar used to answer with 23505 (#1421); and an in-place `UPDATE` of a row being moved waits and gets 40001.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_rows_cross_columnar_partitions_and_keys_hold_through_the_parent` | the row-moving update against heap, the three key arms, and the three races with each contender seen waiting |
+| `test_a_keyed_update_keeps_its_memory_bounded` | an UPDATE of 25,000 keyed rows, in place and moving partition, over a row group with deletes, grows the backend's memory by under 32 MB (#1422 review) |
+
+## 122. test_prepared_across_sessions.py: a prepared transaction, seen from other sessions and across a crash
+
+The pytest twin of `test/prepared_across_sessions.sh` (#1341), every check by the shell's name, on a private cluster because the last arm crashes the postmaster. While a transaction is prepared, another session does not see its insert and still sees the rows its DELETE removed. A second insert of a key it holds waits and gets 23505 after COMMIT PREPARED; an UPDATE of a row it updated waits and gets 40001, which needs #1421's fix (it got 23505 before, the table having a primary key). ROLLBACK PREPARED of a DELETE and of an UPDATE leaves every row as it was. A prepared insert survives an immediate stop, is still listed in `pg_prepared_xacts`, and after COMMIT PREPARED its rows equal a heap table's.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_prepared_transaction_across_sessions_and_a_crash` | visibility while prepared, the two waits and their errors, both ROLLBACK PREPAREDs, and the crash |

@@ -258,6 +258,7 @@ SUITES=(
 	parquet_nested
 	parquet_nested_import
 	partition_lifecycle
+	partition_rows
 	partman_columnar
 	pg19_vacuum_options
 	pg_dump_roundtrip
@@ -268,6 +269,7 @@ SUITES=(
 	phase6
 	planner_choice_quality
 	preimage_rewrite
+	prepared_across_sessions
 	prepared_writes
 	projection_drop_column
 	projection_parallel

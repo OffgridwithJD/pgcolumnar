@@ -2459,4 +2459,38 @@ suites_not_covered 230
 #     never         2291 + 11 = 2302
 #     dated          747 + 2 = 749
 #     2302 + 749 == 3051
-checks_never_observed_red 2302
+#
+# #1421, a concurrent UPDATE of the same row gets 40001 with a unique index too, and
+# #1341's partition shapes (jdatcmd): 2302 -> 2308. partition_rows enters with all 11
+# checks from five-major runs (11/11 on each of 15-19). Seven are dated on PG17:
+#   - the tree before #1421: the move-versus-move race (23505 where heap gives 40001);
+#   - a moving row not marked deleted in the partition it leaves: the split, the
+#     content, the index lookup, the freed key, both 40001 races and the final
+#     content.
+# The other four arrive never: the three duplicate-key refusals and the move itself.
+#
+#
+# Four more from the #1422 review, a keyed UPDATE's memory over groups with
+# deletes, from five-major runs (15/15 on each of 15-19). The two bounds are dated
+# by the tree before the fix, where each UPDATE grew by 402 MB; the delete-marks
+# premise and the every-row-once check arrive never.
+#
+#     ledger rows   3051 + 15 = 3066
+#     never         2302 + 6 = 2308
+#     dated          749 + 9 = 758
+#     2308 + 758 == 3066
+#
+# #1341, a prepared transaction seen from other sessions and across a crash
+# (jdatcmd, stacked on #1422): 2308 -> 2319. prepared_across_sessions enters with all
+# 12 checks from five-major runs (12/12 on each of 15-19). One is dated on PG17 by
+# the tree before #1421, where an UPDATE of a row a prepared transaction updated
+# failed with 23505. The other nine arrive never: a discard at PRE_PREPARE did not
+# redden them, because each statement's writes are flushed at its executor end.
+# Two more premises from the #1428 review, that the DELETE and the UPDATE are each
+# prepared before their ROLLBACK PREPARED arms, arrive never.
+#
+#     ledger rows   3066 + 12 = 3078
+#     never         2308 + 11 = 2319
+#     dated          758 + 1 = 759
+#     2319 + 759 == 3078
+checks_never_observed_red 2319
