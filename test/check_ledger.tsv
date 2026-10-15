@@ -2657,7 +2657,6 @@ projections	projections	p2 id is 2	15;16;17;18;19	never	-
 projections	projections	p2 sort_key empty	15;16;17;18;19	never	-
 projections	projections	planner still uses projection after vacuum	15;16;17;18;19	never	-
 projections	projections	premise: the base table holds every committed row	15;16;17;18;19	never	-
-projections	projections	premise: the drop really removed the projection	15;16;17;18;19	never	-
 projections	projections	projection chosen for covering + sort-key query	15;16;17;18;19	never	-
 projections	projections	projection matches base after second vacuum	15;16;17;18;19	never	-
 projections	projections	projection scan matches oracle after delete	15;16;17;18;19	never	-
@@ -2676,6 +2675,7 @@ projections	projections	sort key not in columns	15;16;17;18;19	never	-
 projections	projections	storage id resolves	15;16;17;18;19	never	-
 projections	projections	table populated	15;16;17;18;19	never	-
 projections	projections	table still readable after DDL	15;16;17;18;19	never	-
+projections	projections	the drop really removed the projection	15;16;17;18;19	never	-
 projections	projections	the rebuild does not abort on it	15;16;17;18;19	never	-
 projections	projections	two declared projections to start	15;16;17;18;19	never	-
 projections	projections	two rows after first add (base + p1)	15;16;17;18;19	never	-
