@@ -2722,8 +2722,11 @@ vacuum_lock_privilege	vacuum_lock_privilege	premise: victim is a columnar table	
 vacuum_lock_privilege	vacuum_lock_privilege	recluster refuses a non-owner before taking its lock (#749)	15;16;17;18;19	2026-10-14	every maintenance entry point checks ownership after taking its lock
 vacuum_lock_privilege	vacuum_lock_privilege	the owner can still add and drop a projection (#749 control)	15;16;17;18;19	never	-
 vacuum_lock_privilege	vacuum_lock_privilege	the owner can still compact the table (#749 control)	15;16;17;18;19	never	-
+vacuum_lock_privilege	vacuum_lock_privilege	the owner can still truncate the table, and is told how many blocks it returned (#1384 control)	15;16;17;18;19	2026-10-14	truncate refusing every caller, its owner included
 vacuum_lock_privilege	vacuum_lock_privilege	the owner can still vacuum the table	15;16;17;18;19	never	-
 vacuum_lock_privilege	vacuum_lock_privilege	the refused caller never queued a lock request on victim, watched while it ran	15;16;17;18;19	2026-10-14	every maintenance entry point checks ownership after taking its lock;pgcolumnar.vacuum checks ownership after taking its AccessExclusiveLock
+vacuum_lock_privilege	vacuum_lock_privilege	truncate refuses a non-owner before taking its lock (#1384)	15;16;17;18;19	2026-10-14	truncate checking ownership after its lock and its type check (main before #1384's fix)
+vacuum_lock_privilege	vacuum_lock_privilege	truncate tells a non-owner nothing about the relation type (#1384)	15;16;17;18;19	2026-10-14	truncate checking ownership after its lock and its type check (main before #1384's fix)
 vacuum_lock_privilege	vacuum_lock_privilege	vacuum refuses a non-owner before taking the exclusive lock	15;16;17;18;19	2026-10-14	every maintenance entry point checks ownership after taking its lock;pgcolumnar.vacuum checks ownership after taking its AccessExclusiveLock
 vacuum_lock_privilege	vacuum_lock_privilege	vacuum_sorted refuses a non-owner before taking the exclusive lock	15;16;17;18;19	2026-10-14	every maintenance entry point checks ownership after taking its lock
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-

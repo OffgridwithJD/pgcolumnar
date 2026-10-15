@@ -2271,4 +2271,15 @@ suites_not_covered 234
 #     never         2095     = 2095
 #     dated          679 + 9 =  688
 #     2095 + 688 == 2783
+#
+# #1384, truncate checks ownership before its lock (jdatcmd): 2095 -> 2095.
+# vacuum_lock_privilege gains three checks from five-major runs (22/22 on each of
+# 15-19), all dated: the contention and type-disclosure arms by main's truncate,
+# which opened the relation and named its type before checking ownership, and the
+# owner control by truncate refusing every caller.
+#
+#     ledger rows   2783 + 3 = 2786
+#     never         2095     = 2095
+#     dated          688 + 3 =  691
+#     2095 + 691 == 2786
 checks_never_observed_red 2095
