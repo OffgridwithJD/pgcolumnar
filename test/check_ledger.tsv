@@ -1,3 +1,18 @@
+alter_table_scans	alter_table_scans	ADD COLUMN with a volatile default rewrites the table, as on heap	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	ADD PRIMARY KEY is refused over a duplicate (23505), as on heap	15;16;17;18;19	never	-
+alter_table_scans	alter_table_scans	ADD PRIMARY KEY succeeds once the duplicate is deleted, as on heap	15;16;17;18;19	2026-10-15	the index build marks every row alive, deleted ones included (src/columnar_tableam.c)
+alter_table_scans	alter_table_scans	ALTER COLUMN TYPE rewrites the table, as on heap	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	SET NOT NULL is refused over a NULL (23502), as on heap	15;16;17;18;19	never	-
+alter_table_scans	alter_table_scans	SET NOT NULL succeeds once the NULL row is deleted, as on heap	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	VALIDATE CONSTRAINT succeeds once the breaking row is deleted, as on heap	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	a CHECK added NOT VALID is accepted, as on heap	15;16;17;18;19	never	-
+alter_table_scans	alter_table_scans	and VALIDATE CONSTRAINT is refused over the row that breaks it (23514), as on heap	15;16;17;18;19	never	-
+alter_table_scans	alter_table_scans	and that rewrite gave every live row a value and brought back no deleted one	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	and the constraint is recorded as validated	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	and the rewrite kept the live rows and not the deleted ones	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	the deleted rows are gone from both tables, which hold the same rows	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
+alter_table_scans	alter_table_scans	the lookup of id 1 is an index scan on the primary key	15;16;17;18;19	2026-10-15	the index build marks every row alive, deleted ones included (src/columnar_tableam.c)
+alter_table_scans	alter_table_scans	the primary key still finds id 1 once, through the index, after both rewrites	15;16;17;18;19	never	-
 am_contracts	am_contracts	ON CONFLICT DO NOTHING skips the duplicate and inserts the new row	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	ON CONFLICT DO UPDATE is refused as unsupported (0A000), and changes nothing	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	ON CONFLICT DO UPDATE with no conflicting row inserts it	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
