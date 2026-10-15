@@ -2400,4 +2400,18 @@ suites_not_covered 231
 #     never         2282     = 2282
 #     dated          725 + 1 =  726
 #     2282 + 726 == 3008
+#
+# #1341, a statement does not see its own writes after a mid-statement flush
+# (jdatcmd): 2282 -> 2282. statement_self_visibility enters with all 9 checks from
+# five-major runs (9/9 on each of 15-19). Every shape starts from fresh tables, so
+# each was observed alone (OffgridwithJD, review of #1416), and all 9 are dated on
+# PG17 by one mutant: a serial scan that re-reads its row-group list when it
+# reaches the end. Each statement then fed on the groups it had flushed until its
+# statement_timeout, or, in the CTE, until id overflowed, and each comparison with
+# heap differed.
+#
+#     ledger rows   3008 + 9 = 3017
+#     never         2282 + 0 = 2282
+#     dated          726 + 9 = 735
+#     2282 + 735 == 3017
 checks_never_observed_red 2282
