@@ -683,4 +683,6 @@ guard_tests 435
 # over the cluster files on this tree.
 # cluster_tests 574 -> 575 for #1341's test_large_values.py, one test, by collection
 # over the cluster files on this tree.
-cluster_tests 575
+# cluster_tests 575 -> 576 for #1341's test_recovery_minimal_wal.py, one test, by collection
+# over the cluster files on this tree.
+cluster_tests 576

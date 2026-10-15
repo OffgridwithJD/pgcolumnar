@@ -2375,4 +2375,18 @@ suites_not_covered 231
 #     never         2278 + 3 = 2281
 #     dated          714 + 3 = 717
 #     2281 + 717 == 2998
-checks_never_observed_red 2281
+#
+# #1341, tables that skip WAL at wal_level=minimal survive a crash (jdatcmd): 2281 ->
+# 2282. recovery_minimal_wal enters with all 9 checks from five-major runs (9/9 on
+# each of 15-19). Eight are dated on PG17 by one mutant: the relfilenode created
+# with smgrcreate instead of RelationCreateStorage, so no commit-time sync is
+# registered. On this assert-enabled build the server then fails relcache.c's
+# RelFileLocatorSkippingWAL assertion during the load, so the loads do not commit;
+# what a build without assertions would lose was not measured. The premise arrives
+# never.
+#
+#     ledger rows   2998 + 9 = 3007
+#     never         2281 + 1 = 2282
+#     dated          717 + 8 = 725
+#     2282 + 725 == 3007
+checks_never_observed_red 2282

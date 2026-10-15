@@ -285,6 +285,7 @@ SUITES=(
 	recluster_extent
 	recluster_gate
 	recovery
+	recovery_minimal_wal
 	replication
 	rewrite_group_scan
 	rewrite_storage_oid

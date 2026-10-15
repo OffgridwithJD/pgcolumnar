@@ -163,6 +163,7 @@ behaviour, the source of that number is named.
 - [115. test_alter_table_scans.py: ALTER TABLE forms see the live rows and only those](#115-test_alter_table_scanspy-alter-table-forms-see-the-live-rows-and-only-those)
 - [116. test_settings_reference.py: the settings reference matches the server](#116-test_settings_referencepy-the-settings-reference-matches-the-server)
 - [117. test_large_values.py: megabyte-scale values are stored exactly](#117-test_large_valuespy-megabyte-scale-values-are-stored-exactly)
+- [118. test_recovery_minimal_wal.py: tables that skip WAL survive a crash](#118-test_recovery_minimal_walpy-tables-that-skip-wal-survive-a-crash)
 
 ## 1. How to read a test in here
 
@@ -6995,3 +6996,13 @@ The pytest twin of `test/large_values.sh` (#1341), every check by the shell's na
 | test | what it holds |
 | --- | --- |
 | `test_megabyte_values_are_stored_exactly` | the four values and the TOASTed update against heap, and the rows the update left alone |
+
+## 118. test_recovery_minimal_wal.py: tables that skip WAL survive a crash
+
+The pytest twin of `test/recovery_minimal_wal.sh` (#1341), every check by the shell's name. A private cluster at `wal_level=minimal`, stopped with `-m immediate` for each crash. A columnar table and a heap mirror are created and loaded in one transaction, and later truncated and reloaded in one, so PostgreSQL skips WAL for them and makes them durable at COMMIT. Each arm reads the committed row count before the crash, so a load that failed cannot pass as two empty tables that agree, then checks that the server came back through crash recovery and that the columnar table holds what its heap mirror holds. Both commit-time branches run: `wal_skip_threshold` 0 (fsync) and 64MB (the new pages written to WAL).
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_tables_skipping_wal_survive_a_crash` | the premise, and create-and-load and truncate-and-reload at both thresholds, each across a crash |
