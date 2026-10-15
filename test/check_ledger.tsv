@@ -1889,6 +1889,35 @@ harness_selftest	640-every-suite-job-installs-the-extensions	the detector names 
 harness_selftest	640-every-suite-job-installs-the-extensions	the detector names a workflow in which it finds no suite job	15;16;17;18;19	2026-10-14	640's _ej_missing without its no-suite-job guard
 harness_selftest	640-every-suite-job-installs-the-extensions	the detector names a workflow it cannot read	15;16;17;18;19	2026-10-14	640's _ej_missing without its unreadable-file guard
 harness_selftest	640-every-suite-job-installs-the-extensions	the suite-running jobs are exactly the five this part knows	15;16;17;18;19	2026-10-14	640's job scan no longer counts a cluster job that runs pytest
+iceberg_rest_server	iceberg_rest_server	a catalog_uri option on the USER MAPPING is rejected (HV00D)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a half OAuth2 credential (id, no secret) is refused before any request (28000)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a link-local oauth_token_uri is refused by the allow-list (42501)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a non-superuser with no token mapping is refused (28000) despite the environment token, before any request	15;16;17;18;19	2026-10-15	the REST resolver letting every role borrow the environment token
+iceberg_rest_server	iceberg_rest_server	a server with an OAuth2 mapping reads by a minted bearer	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a token option on the SERVER is rejected (HV00D)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a warehouse option on the SERVER is accepted (not HV00D)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a warehouse-configured server resolves a table location	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a wrong OAuth2 client secret is refused (28000)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	a wrong mapping token is refused (28000)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	an oauth option on the SERVER is rejected (HV00D)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	an off-allow-list oauth_token_uri host is refused (42501)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	and it cannot mark its own mapping credentials_required false (42501)	15;16;17;18;19	2026-10-15	the catalog validator letting a non-superuser set credentials_required false
+iceberg_rest_server	iceberg_rest_server	backend still up	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	control: with credentials_required false set by a superuser, the same role reads by the environment token	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	iceberg_rest_table_location('cat',...) reads via the mapping token	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	loadTable then carried the minted bearer (Authorization present)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	no mapping and no env token is refused, not bypassed (28000)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	oauth options are accepted on a USER MAPPING (no error)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	premise: rest fixture up	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	premise: the PG server log holds lines to search, for the client secret	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	premise: the PG server log holds lines to search, for the mapping token	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the OAuth2 token endpoint was called (POST /v1/oauth/tokens)	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the catalog-URI form still works with the env token	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the client secret never appears in the PG server log	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the client secret never appears in the fixture request log	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the mapping token never appears in the PG server log	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the request carried an Authorization header	15;16;17;18;19	never	-
+iceberg_rest_server	iceberg_rest_server	the warehouse was sent on GET /v1/config (?warehouse=wh1)	15;16;17;18;19	never	-
 import_export_privilege	import_export_privilege	export_arrow refuses SELECT of a table the caller cannot read	15;16;17;18;19	never	-
 import_export_privilege	import_export_privilege	export_parquet refuses SELECT of a table the caller cannot read	15;16;17;18;19	never	-
 import_export_privilege	import_export_privilege	get_storage_id refuses a caller who cannot SELECT the relation	15;16;17;18;19	never	-
@@ -2496,6 +2525,64 @@ rollup	rollup	the rollup to be dumped folds its source	15;16;17;18;19	never	-
 rollup	rollup	the second refresh of the NULL-key rollup folded the append	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	the zone rollups hold a row per key of the recompute	15;16;17;18;19	2026-10-13	refresh_rollup folding only the first new group;row_tid mapping 290 rows a block instead of the AM's
 rollup	rollup	two refreshes started together fold the new rows once between them	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup folding only the first new group;refresh_rollup without the self-conflicting lock;row_tid mapping 290 rows a block instead of the AM's
+server_file_privilege	server_file_privilege	coverage check found the file functions (not an empty scan)	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: file_split_offsets	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_current_snapshot	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_data_files	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_fdw_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_rest_namespaces	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_rest_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_rest_table_location	15;16;17;18;19	2026-10-15	iceberg_rest_table_location without its pg_read_server_files gate
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_rest_tables	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: iceberg_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: import_arrow	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: import_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: parallel_copy	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: parquet_fdw_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: parquet_schema	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: read_avro_manifest	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: read_manifest_list	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_read_server_files gate: read_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_write_server_files gate: export_arrow	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_write_server_files gate: export_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_write_server_files gate: parallel_export_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	no role is refused by the pg_write_server_files gate: tier_partition	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: export_arrow	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: export_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: file_split_offsets	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: iceberg_current_snapshot	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: iceberg_data_files	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: iceberg_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: import_arrow	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: import_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: parallel_copy	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: parallel_export_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: parquet_schema	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: read_avro_manifest	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: read_manifest_list	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: read_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	server-file function is covered by the boundary test: tier_partition	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: file_split_offsets	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_current_snapshot	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_data_files	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_fdw_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_rest_namespaces	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_rest_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_rest_table_location	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_rest_tables	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: iceberg_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: import_arrow	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: import_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: parallel_copy	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: parquet_fdw_scan	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: parquet_schema	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: read_avro_manifest	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: read_manifest_list	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_read_server_files role gets past the gate: read_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_write_server_files role gets past the gate: export_arrow	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_write_server_files role gets past the gate: export_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_write_server_files role gets past the gate: parallel_export_parquet	15;16;17;18;19	never	-
+server_file_privilege	server_file_privilege	the pg_write_server_files role gets past the gate: tier_partition	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	REFRESH MATERIALIZED VIEW repairs the view's row	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row
 storage_row_repair	storage_row_repair	a same-type ALTER COLUMN ... USING repairs the table's row	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row
 storage_row_repair	storage_row_repair	after both repairs the notes' query finds nothing	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row;the release notes' query is edited from NOT EXISTS to EXISTS
