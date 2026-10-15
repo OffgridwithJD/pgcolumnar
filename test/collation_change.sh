@@ -125,4 +125,58 @@ q "CREATE TABLE pj (k int, s text COLLATE \"C\") USING pgcolumnar;
 check "a projection sorted on the column answers a range as heap does" \
 	"$(q "SELECT (SELECT count(*) FROM pj WHERE s < 'B') = (SELECT count(*) FROM ch WHERE k <= 3000 AND s < 'B');")" "t"
 
+# ---- a type change without a rewrite (#1341 item 19) ---------------------------
+#
+# int4 to oid is a binary-coercible cast, so ALTER COLUMN ... TYPE oid rewrites
+# nothing, but oid orders unsigned: -5 is 4294967291. The zone maps, the extent, a
+# vacuum_sorted order and a projection's sort all kept int4's order, as they kept
+# the old collation's above. Every group holds negative and positive values, so
+# under int4 each group's maximum is under 3000, and a stale zone map prunes every
+# group from WHERE c > 3000000000.
+for t in tc th; do
+	am="USING pgcolumnar"; [ "$t" = th ] && am=""
+	q "CREATE TABLE $t (k int, c int) $am;" >/dev/null
+done
+q "SELECT pgcolumnar.set_options('tc', stripe_row_limit => 1000, chunk_group_row_limit => 1000);" >/dev/null
+for t in tc th; do
+	q "INSERT INTO $t SELECT g, CASE WHEN g % 2 = 0 THEN g ELSE -g END FROM generate_series(1, 3000) g;" >/dev/null
+done
+check "premise: the int table has several row groups" \
+	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('tc');")" "3"
+before="$(q "SELECT pg_relation_filenode('tc');")"
+for t in tc th; do
+	q "ALTER TABLE $t ALTER COLUMN c TYPE oid;" >/dev/null
+done
+check "premise: the change from int4 to oid rewrote nothing" "$(q "SELECT pg_relation_filenode('tc');")" "$before"
+same_as() {	# same_as COLUMNAR HEAP SQL-with-%T -> "same", or both answers when they differ
+	local c h
+	c="$(q "${3//%T/$1}")"; h="$(q "${3//%T/$2}")"
+	[ -n "$c" ] && [ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
+}
+check "after int4 to oid min and max are heap's" "$(same_as tc th "SELECT min(c) || '|' || max(c) FROM %T;")" "same"
+check "and a range above every int4 value returns heap's rows" \
+	"$(same_as tc th "SELECT count(*) || ':' || min(c) || '|' || max(c) FROM %T WHERE c > 3000000000;")" "same"
+check "and an equality on a value that was negative returns heap's rows" \
+	"$(same_as tc th "SELECT count(*) FROM %T WHERE c = 4294967295;")" "same"
+check "the int column's extent is not int4's bound" \
+	"$(q "SELECT coalesce((SELECT minimum || '|' || maximum FROM pgcolumnar.column_extent('tc', 'c')), 'none')
+	         IN ('none', (SELECT min(c) || '|' || max(c) FROM th))::text;")" "true"
+# A table sorted on the int column, and a projection sorted on it: both are in
+# int4's order, which is not oid's.
+q "CREATE TABLE ts (k int, c int) USING pgcolumnar;
+   CREATE TABLE tsh (k int, c int);
+   INSERT INTO ts SELECT g, CASE WHEN g % 2 = 0 THEN g ELSE -g END FROM generate_series(1, 3000) g;
+   INSERT INTO tsh SELECT g, CASE WHEN g % 2 = 0 THEN g ELSE -g END FROM generate_series(1, 3000) g;
+   SELECT pgcolumnar.vacuum_sorted('ts', 'c');
+   ALTER TABLE ts ALTER COLUMN c TYPE oid;
+   ALTER TABLE tsh ALTER COLUMN c TYPE oid;" >/dev/null
+check "a table sorted on int4 orders ORDER BY ... LIMIT as heap does after int4 to oid" \
+	"$(same_as ts tsh "SELECT string_agg(c::text, ',') FROM (SELECT c FROM %T ORDER BY c, k LIMIT 6) x;")" "same"
+q "CREATE TABLE tp (k int, c int) USING pgcolumnar;
+   INSERT INTO tp SELECT g, CASE WHEN g % 2 = 0 THEN g ELSE -g END FROM generate_series(1, 3000) g;
+   SELECT pgcolumnar.add_projection('tp', 'tp_by_c', columns => ARRAY['c', 'k'], sort_key => ARRAY['c']);
+   ALTER TABLE tp ALTER COLUMN c TYPE oid;" >/dev/null
+check "a projection sorted on the int column answers a range as heap does after int4 to oid" \
+	"$(same_as tp tsh "SELECT count(*) || ':' || min(c) FROM %T WHERE c > 3000000000;")" "same"
+
 pgc_summary
