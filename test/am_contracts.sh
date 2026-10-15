@@ -309,4 +309,22 @@ psql_run "INSERT INTO ibu VALUES (5);"
 check "a unique index builds over a key whose other holder is a deleted row" \
 	"$(state "CREATE UNIQUE INDEX ibu_k ON ibu (k);")|$(q "SET enable_seqscan = off; SELECT count(*) FROM ibu WHERE k = 5;" | tail -1)" "ok|1"
 
+# But only rows some snapshot can still see (#1407). Every deleted row went in, so
+# REINDEX, documented as what reclaims stale entries, reclaimed none: 9 rows in 10
+# deleted, and the rebuilt index kept its size where heap's shrank to a tenth.
+for am in pgcolumnar heap; do
+	psql_run "CREATE TABLE ix_$am (a int) USING $am; INSERT INTO ix_$am SELECT g FROM generate_series(1, 100000) g;
+	          CREATE INDEX ix_${am}_a ON ix_$am (a); DELETE FROM ix_$am WHERE a % 10 <> 0;"
+done
+ix_reclaim() {	# ix_reclaim AM -> reclaimed, when REINDEX takes the index under half its size
+	local before after
+	before="$(q "SELECT pg_relation_size('ix_${1}_a')")"
+	psql_run "REINDEX INDEX ix_${1}_a;"
+	after="$(q "SELECT pg_relation_size('ix_${1}_a')")"
+	[ -n "$before" ] && [ -n "$after" ] && [ "$after" -lt $((before / 2)) ] && echo reclaimed || echo "kept:$before->$after"
+}
+check "REINDEX after a committed delete of most rows reclaims their entries, as heap's does" \
+	"$(ix_reclaim pgcolumnar)|$(ix_reclaim heap)|$(q "SET enable_seqscan = off; SELECT count(*) FROM ix_pgcolumnar WHERE a > 0;" | tail -1)" \
+	"reclaimed|reclaimed|10000"
+
 pgc_summary

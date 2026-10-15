@@ -1,6 +1,7 @@
 am_contracts	am_contracts	ON CONFLICT DO NOTHING skips the duplicate and inserts the new row	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	ON CONFLICT DO UPDATE is refused as unsupported (0A000), and changes nothing	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	ON CONFLICT DO UPDATE with no conflicting row inserts it	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
+am_contracts	am_contracts	REINDEX after a committed delete of most rows reclaims their entries, as heap's does	15;16;17;18;19	2026-10-15	the index build indexing every deleted row (main before #1407's fix)
 am_contracts	am_contracts	a DO NOTHING racing an uncommitted insert of the same key waits, then skips it	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	a TRUNCATE rolled back at transaction level restores every row	15;16;17;18;19	2026-10-14	TRUNCATE empties the old storage in place (RelationTruncate before the swap)
 am_contracts	am_contracts	a TRUNCATE rolled back to a savepoint restores every row, and the transaction goes on	15;16;17;18;19	2026-10-14	TRUNCATE empties the old storage in place (RelationTruncate before the swap)

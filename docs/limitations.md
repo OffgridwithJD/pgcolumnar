@@ -779,7 +779,9 @@ therefore still be cheaper as a scan.
 ## Indexes
 
 - Stale index entries left by deletes and updates are filtered on fetch and
-  reclaimed by `REINDEX`, not removed opportunistically.
+  reclaimed by `REINDEX`, not removed opportunistically. `REINDEX` keeps the entry
+  of a deleted row only while a transaction that began before the delete is still
+  running, as it does on heap.
 - `CREATE INDEX CONCURRENTLY` (the concurrent validate path) and partial
   block-range index builds are not supported.
 

@@ -296,6 +296,15 @@ struct PgColumnarReadState
 	bool		emitDeleted;
 	bool		lastRowDeleted;
 
+	/*
+	 * With emitDeleted, a row deleted under THIS snapshot too is dead to every
+	 * transaction, and is not returned (#1407). The index build passes one that
+	 * sees only transactions older than every running snapshot.
+	 */
+	Snapshot	deadHorizon;
+	char	   *deadMask;
+	uint32		deadMaskLen;
+
 	MemoryContext readContext;		/* whole scan */
 	MemoryContext stripeContext;	/* reset per stripe */
 	MemoryContext groupContext;		/* reset per chunk group (decompressed) */
@@ -2833,6 +2842,17 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 										&rs->nativeDeleteMask,
 										&rs->nativeDeleteMaskLen);
 	}
+	rs->deadMask = NULL;
+	rs->deadMaskLen = 0;
+	if (rs->deadHorizon != NULL && rs->nativeDeleteMask != NULL)
+	{
+		List	   *deadList = PgColumnarReadDeleteVectorList(rs->storageId,
+													   rg->groupNumber,
+													   rs->deadHorizon);
+
+		pgcolumnar_merge_delete_vectors(deadList, (uint32) ((rg->rowCount + 7) / 8),
+										&rs->deadMask, &rs->deadMaskLen);
+	}
 
 	/*
 	 * The chunk metadata is read before the data (#338) because it carries the
@@ -3458,6 +3478,9 @@ pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 
 		if (deleted && !rs->emitDeleted)
 			continue;			/* row deleted: cursors advanced, do not emit */
+		if (deleted && rs->deadMask != NULL &&
+			dv_row_deleted(rs->deadMask, rs->deadMaskLen, rs->rowInGroup - 1))
+			continue;			/* dead to every transaction: no snapshot needs it */
 
 		rs->lastRowDeleted = deleted;
 		return true;
@@ -3477,6 +3500,20 @@ void
 PgColumnarReadSetEmitDeleted(PgColumnarReadState *readState, bool emit)
 {
 	readState->emitDeleted = emit;
+}
+
+/*
+ * PgColumnarReadSetDeadHorizon
+ *		With PgColumnarReadSetEmitDeleted, leave out the deleted rows that are
+ *		deleted under `horizon` too (#1407). The index build passes a snapshot that
+ *		sees only transactions older than every running snapshot, so a row deleted
+ *		there is dead to all and needs no index entry, as heap's build skips a dead
+ *		tuple. Without it every deleted row was indexed, and REINDEX reclaimed none.
+ */
+void
+PgColumnarReadSetDeadHorizon(PgColumnarReadState *readState, Snapshot horizon)
+{
+	readState->deadHorizon = horizon;
 }
 
 bool
