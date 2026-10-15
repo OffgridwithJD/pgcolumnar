@@ -5706,6 +5706,7 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
 | `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
 | `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
+| `test_a_float_sum_that_overflows_raises_as_core_does` | two finite float8s, or reals, whose sum is infinite raise `22003` through the node, as core's `float8pl` and `float4pl` do with it off (#1341 item 50) |
 | `test_a_gating_where_is_honoured_rather_than_dropped` | blocker 2: a one-time filter makes the node decline, and both the false and true gates answer as heap does |
 | `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
 | `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |

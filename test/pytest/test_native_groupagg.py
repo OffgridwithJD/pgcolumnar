@@ -434,6 +434,32 @@ def test_sum_real_matches_heap_rather_than_returning_zero(pgc_conn, expect):
     expect.rows(zeroes, [("True",)], "regress B1: sum(real) is nonzero")
 
 
+def test_a_float_sum_that_overflows_raises_as_core_does(pgc_conn, expect):
+    """Two finite float8s, or two finite reals, whose sum is infinite raise 22003 in
+    core's float8pl and float4pl (#1341 item 50). The node's accumulators must raise
+    it too rather than return Infinity. Judged by SQLSTATE, against core with the
+    node turned off."""
+    _exec(pgc_conn, "CREATE TABLE ovs_col (k int, d float8, r real) USING pgcolumnar")
+    _exec(pgc_conn, "INSERT INTO ovs_col VALUES (1, 1e308, 3e38), (1, 1e308, 3e38)")
+
+    def state(on, sql):
+        _groupvec(pgc_conn, on)
+        try:
+            _one(pgc_conn, sql)
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate or "?"
+
+    _groupvec(pgc_conn, True)
+    fires = "|".join("yes" if MARKER in str(_plan(pgc_conn, f"SELECT k, sum({c}) FROM ovs_col GROUP BY k")) else "no"
+                     for c in ("d", "r"))
+    expect.text(fires, "yes|yes", "sum(float8) and sum(real) overflow: node fires")
+    got = "|".join(state(on, f"SELECT k, sum({c}) FROM ovs_col GROUP BY k")
+                   for on in (True, False) for c in ("d", "r"))
+    _groupvec(pgc_conn, True)
+    expect.text(got, "22003|22003|22003|22003", "sum(float8) and sum(real) overflow raise 22003, as core does")
+
+
 def test_a_gating_where_is_honoured_rather_than_dropped(pgc_conn, expect):
     """Blocker 2: a pseudoconstant one-time filter was dropped, so a false gate
     wrongly returned rows. The node cannot honour a one-time filter, so it must
