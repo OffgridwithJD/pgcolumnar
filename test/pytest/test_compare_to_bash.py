@@ -160,6 +160,11 @@ COMPLETE = ["advisory_lock_class",
 # about the PORT rather than a licence: the standing arm does not grade it, so the
 # reason is the only thing standing between a declared gap and a forgotten one.
 INCOMPLETE = {
+    # #1341's megabyte values: every arm is ported except the opt-in chunk over 1 GB
+    # (PGC_RUN_OVER_1GB=1), which needs several GB of memory and which this layer,
+    # having no SKIP verdict for an arm a run chooses not to make, does not carry.
+    "large_values": "the 1 MB to 200 MB round trips and the TOASTed-update arms are "
+                    "ported; the opt-in chunk-over-1-GB refusal is not",
     # #1293 ported the arms it added: min/max over timestamptz read no data, and
     # stay right after deletes. The int4/text parity, sum/avg, parallel-plan and
     # fallback arms of the shell suite predate it and are #432's to port.

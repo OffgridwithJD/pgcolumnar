@@ -162,6 +162,7 @@ behaviour, the source of that number is named.
 - [114. test_vm_privilege.py: the visibility-map entry points are owner-only and refuse heap](#114-test_vm_privilegepy-the-visibility-map-entry-points-are-owner-only-and-refuse-heap)
 - [115. test_alter_table_scans.py: ALTER TABLE forms see the live rows and only those](#115-test_alter_table_scanspy-alter-table-forms-see-the-live-rows-and-only-those)
 - [116. test_settings_reference.py: the settings reference matches the server](#116-test_settings_referencepy-the-settings-reference-matches-the-server)
+- [117. test_large_values.py: megabyte-scale values are stored exactly](#117-test_large_valuespy-megabyte-scale-values-are-stored-exactly)
 
 ## 1. How to read a test in here
 
@@ -6984,3 +6985,13 @@ The pytest twin of `test/settings_reference.sh` (#1341 items 42, 57 and 83), eve
 | `test_each_documented_default_and_condition_is_the_servers` | each documented default and condition matches `boot_val` and `context` |
 | `test_only_a_superuser_sets_enable_end_truncation` | the 42501 refusal on a real login, and the superuser control |
 | `test_compression_level_reaches_the_zstd_codec` | level 19 stores less than level 1 |
+
+## 117. test_large_values.py: megabyte-scale values are stored exactly
+
+The pytest twin of `test/large_values.sh` (#1341), every check by the shell's name but one. A columnar table has no TOAST table: the writer detoasts each value and stores it inline. A 1 MB value, two 16 MB incompressible values and a 200 MB compressible one go into heap and are copied to a columnar table; then an UPDATE takes a value heap has TOASTed. Each must agree with heap by length and md5. The shell's opt-in arm for a chunk over 1 GB (`PGC_RUN_OVER_1GB=1`, refused with 54000, nothing committed, server up) is not ported, and `test_compare_to_bash.py` declares the pair incomplete for it.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_megabyte_values_are_stored_exactly` | the four values and the TOASTed update against heap, and the rows the update left alone |
