@@ -779,3 +779,18 @@ def test_rollup_dump_and_restore(pgc_cluster, tmp_path, expect):
     finally:
         for db in (src_db, dst_db):
             admin("postgres", f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
+
+
+def test_row_tid_refuses_a_row_number_below_one(pgc_conn, expect):
+    """Row numbers start at 1 (#1341). LAST IN THE FILE, AND A TEST OF ITS OWN: without
+    the floor, row_tid(0) crashed the backend (measured on PG17), which would take the
+    checks after it in the same test down with it."""
+    def state(n):
+        try:
+            _one(pgc_conn, f"SELECT pgcolumnar.row_tid({n})")
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate or "?"
+
+    expect.text(f"{state(0)}|{state(-1)}|{state(1)}", "22003|22003|ok",
+                "row_tid refuses a row number below 1 (22003), and row 1 is accepted")

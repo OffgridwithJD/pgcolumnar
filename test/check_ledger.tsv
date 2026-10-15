@@ -2633,6 +2633,7 @@ rollup	rollup	premise: the source holds every row	15;16;17;18;19	never	-
 rollup	rollup	rebase_rollup of a table that is not a rollup is refused (42704)	15;16;17;18;19	2026-10-14	rebase_rollup without its not-a-rollup check
 rollup	rollup	rebase_rollup records the source's current row groups	15;16;17;18;19	2026-10-13	rebase_rollup returning 0
 rollup	rollup	refreshes from sessions in different time zones build the same rollup	15;16;17;18;19	2026-10-13	refresh_rollup bucketing with date_trunc, which follows the session's zone
+rollup	rollup	row_tid refuses a row number below 1 (22003), and row 1 is accepted	15;16;17;18;19	2026-10-14	row_tid without its floor at row 1 (row_tid(0) then crashed the backend)
 rollup	rollup	the database holding a rollup dumps	15;16;17;18;19	never	-
 rollup	rollup	the dump restores into another database	15;16;17;18;19	never	-
 rollup	rollup	the dump restores into its own database after DROP EXTENSION, again under the recorded storage id	15;16;17;18;19	never	-
