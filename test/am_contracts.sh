@@ -194,7 +194,7 @@ check "and that read saw the rows the outer statement had inserted so far, as on
 rd_off="SET enable_seqscan = off; SET enable_bitmapscan = off;"
 rd_all="SELECT count(*) FROM rd_abort_pgcolumnar WHERE id BETWEEN 1 AND 1000"
 check "and the primary key finds every outer row by index" \
-	"$(q "$rd_off EXPLAIN (COSTS OFF) $rd_all" | grep -q 'Index' && echo index || echo other)|$(q "$rd_off $rd_all" | tail -1)" \
+	"$(case "$(q "$rd_off EXPLAIN (COSTS OFF) $rd_all")" in *Index*) echo index ;; *) echo other ;; esac)|$(q "$rd_off $rd_all" | tail -1)" \
 	"index|1000"
 check "an outer insert survives a read in a nested block that commits into an aborted one, as on heap" \
 	"$(rd_shape nested_pgcolumnar)|$(rd_seen nested_pgcolumnar)" "$(rd_shape nested_heap)|$(rd_seen nested_heap)"
