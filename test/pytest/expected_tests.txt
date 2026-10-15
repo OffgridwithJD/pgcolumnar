@@ -693,4 +693,9 @@ guard_tests 435
 # cluster_tests 579 -> 581 for #1341 items 56 and 55: test_the_row_identity_lock_cannot_be_reached_from_sql
 # and test_bulk_parallel_writer_set_by_hand_still_serialises_a_first_write in
 # cluster_tests 581 -> 582 for #1341's test_maintenance_rollback.py, one test, by collection
-cluster_tests 582
+# cluster_tests 582 -> 585 for #1421's test_partition_rows.py, one test, by collection
+# cluster_tests 568 -> 569 for #1422 review's test_a_keyed_update_keeps_its_memory_bounded
+# in test_partition_rows.py, by collection over the cluster files on this tree.
+# cluster_tests 569 -> 570 for #1341's test_prepared_across_sessions.py, one test, by
+# collection over the cluster files on this tree (stacked on #1422).
+cluster_tests 585
