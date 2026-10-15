@@ -164,6 +164,7 @@ behaviour, the source of that number is named.
 - [116. test_settings_reference.py: the settings reference matches the server](#116-test_settings_referencepy-the-settings-reference-matches-the-server)
 - [117. test_large_values.py: megabyte-scale values are stored exactly](#117-test_large_valuespy-megabyte-scale-values-are-stored-exactly)
 - [118. test_recovery_minimal_wal.py: tables that skip WAL survive a crash](#118-test_recovery_minimal_walpy-tables-that-skip-wal-survive-a-crash)
+- [119. test_statement_self_visibility.py: a statement does not see its own writes](#119-test_statement_self_visibilitypy-a-statement-does-not-see-its-own-writes)
 
 ## 1. How to read a test in here
 
@@ -7007,3 +7008,13 @@ The pytest twin of `test/recovery_minimal_wal.sh` (#1341), every check by the sh
 | test | what it holds |
 | --- | --- |
 | `test_tables_skipping_wal_survive_a_crash` | the premise, and create-and-load and truncate-and-reload at both thresholds, each across a crash |
+
+## 119. test_statement_self_visibility.py: a statement does not see its own writes
+
+The pytest twin of `test/statement_self_visibility.sh` (#1341), every check by the shell's name. A scan reads its row-group list once, when it starts, so the groups its own statement flushes later are not in it. With row groups of 1000 rows, `INSERT INTO t SELECT FROM t`, an `UPDATE` of every row, both in one transaction after an earlier write, and an `INSERT` in a `WITH` clause each run on a columnar table and on heap, and heap is the answer. An arm checks that the `INSERT` really flushed row groups while its scan was reading. Every statement runs under a `statement_timeout`, because a scan that fed on its own output would never end. Both tables run every statement, so a columnar failure cannot make the comparison vacuous.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_statement_does_not_see_its_own_writes` | the four shapes run to completion and answer as heap does, and the mid-statement flush |

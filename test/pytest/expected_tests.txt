@@ -687,4 +687,6 @@ guard_tests 435
 # over the cluster files on this tree.
 # cluster_tests 576 -> 577 for #1341's test_row_tid_refuses_a_row_number_below_one in
 # test_rollup.py, by collection over the cluster files on this tree.
-cluster_tests 577
+# cluster_tests 577 -> 578 for #1341's test_statement_self_visibility.py, one test, by collection
+# over the cluster files on this tree.
+cluster_tests 578

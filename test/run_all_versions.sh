@@ -302,6 +302,7 @@ SUITES=(
 	sorted_mark_rename
 	sorted_pathkeys
 	sorted_projection
+	statement_self_visibility
 	stats_privilege
 	storage_row_repair
 	tablesample
