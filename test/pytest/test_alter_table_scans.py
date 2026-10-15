@@ -39,7 +39,6 @@ def _answers(conn, sql, setup=()):
 
 
 def test_alter_table_forms_see_the_live_rows_and_only_those(pgc_conn, expect):
-    pgc_conn.autocommit = True
     with pgc_conn.cursor() as cur:
         for am in AMS:
             cur.execute(f"CREATE TABLE at_{am} (id int, v int, w text) USING {am}")
