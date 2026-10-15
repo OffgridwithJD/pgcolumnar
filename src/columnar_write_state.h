@@ -42,6 +42,7 @@ extern void PgColumnarDiscardAllPendingWrites(void);
 
 extern void PgColumnarWriteStateDiscardSubXact(SubTransactionId subid);
 
+extern void PgColumnarWriteStateAfterAppend(PgColumnarWriteState *writeState);
 extern void PgColumnarWriteStatePromoteSubXact(SubTransactionId subid,
 											 SubTransactionId parent);
 

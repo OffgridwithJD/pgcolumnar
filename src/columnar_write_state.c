@@ -292,6 +292,26 @@ struct PgColumnarWriteState
 {
 	Oid			relid;
 	SubTransactionId subid;			/* subtransaction that owns the buffer */
+
+	/*
+	 * Set while the buffer's rows are on disk under a subtransaction BELOW the
+	 * owner, written by a read in that subtransaction (#1360); invalid otherwise.
+	 * The buffer is kept until that subtransaction resolves: committed into the
+	 * owner, the rows are the owner's and the buffer is dropped; aborted, the
+	 * catalog rows go and the kept buffer is flushed again under the owner.
+	 */
+	SubTransactionId flushedUnder;
+
+	/*
+	 * Set once a read below the owner has had to write this buffer out (#1403
+	 * review). The owner's next append then writes the buffer at once, under the
+	 * owner, and clears it, so each read costs one write of the rows since the
+	 * last and every row is written at most twice. Kept instead, the buffer grew
+	 * with each row and every abort's re-write covered every earlier row
+	 * (quadratic); eager until the statement ended, one early read made every
+	 * later row its own row group.
+	 */
+	bool		eagerFlush;
 	TupleDesc	tupdesc;			/* copy owned by writeContext */
 	int			natts;
 
@@ -373,7 +393,12 @@ static List *PgColumnarWriteStates = NIL;
 bool		pgcolumnar_parallel_flush = false;
 
 static void pgcolumnar_flush_row_group(PgColumnarWriteState *writeState);
+static void flush_row_group(PgColumnarWriteState *writeState, bool keep);
+static void reset_stripe(PgColumnarWriteState *writeState);
 static void flush_ws_projections(PgColumnarWriteState *writeState);
+static void flush_ws_projections_ext(PgColumnarWriteState *writeState, bool keep);
+static void reset_ws_projections(PgColumnarWriteState *writeState);
+static bool ws_has_projection_rows(PgColumnarWriteState *writeState);
 static ChunkGroupBuffer *pgcolumnar_start_chunk_group(PgColumnarWriteState *writeState);
 static uint64 *grow_uint64_array(uint64 *arr, int oldSize, int newSize);
 static void pgcolumnar_init_col_defs(PgColumnarWriteState *writeState);
@@ -2961,6 +2986,34 @@ rel_new_in_current_xact(Oid relid)
 static void
 pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 {
+	flush_row_group(writeState, false);
+}
+
+/*
+ * reset_stripe
+ *		Drop the buffered stripe once its rows are the owner's on disk; the next
+ *		row reserves a fresh stripe id (row group).
+ */
+static void
+reset_stripe(PgColumnarWriteState *writeState)
+{
+	MemoryContextReset(writeState->stripeContext);
+	writeState->chunkGroups = NIL;
+	writeState->currentGroup = NULL;
+	writeState->stripeRowCount = 0;
+	writeState->haveReservation = false;
+}
+
+/*
+ * flush_row_group
+ *		Write the buffered stripe as one row group. With `keep`, the buffer and
+ *		its reservation survive the write, so the same rows can be written again,
+ *		with the same group number and row numbers, if the subtransaction the
+ *		catalog rows went under aborts (#1360).
+ */
+static void
+flush_row_group(PgColumnarWriteState *writeState, bool keep)
+{
 	MemoryContext flushContext;
 	MemoryContext oldContext;
 	Relation	rel;
@@ -3267,12 +3320,8 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	MemoryContextSwitchTo(oldContext);
 	MemoryContextDelete(flushContext);
 
-	/* reset accumulation; the next row reserves a fresh stripe id (row group) */
-	MemoryContextReset(writeState->stripeContext);
-	writeState->chunkGroups = NIL;
-	writeState->currentGroup = NULL;
-	writeState->stripeRowCount = 0;
-	writeState->haveReservation = false;
+	if (!keep)
+		reset_stripe(writeState);
 
 	if (pushedSnapshot)
 		PopActiveSnapshot();
@@ -3483,7 +3532,7 @@ proj_row_cmp(const void *a, const void *b, void *arg)
  *		stripe to the projection's storage, then reset the buffer.
  */
 static void
-flush_proj_writer(PgColumnarProjWriter *w, Relation tableRel)
+flush_proj_writer(PgColumnarProjWriter *w, Relation tableRel, bool keep)
 {
 	int			i;
 
@@ -3506,6 +3555,13 @@ flush_proj_writer(PgColumnarProjWriter *w, Relation tableRel)
 	if (w->innerWs->stripeRowCount > 0)
 		pgcolumnar_flush_row_group(w->innerWs);
 
+	/*
+	 * Kept rows are written again, re-encoded under a new projection group, if
+	 * the subtransaction this write went under aborts (#1360). Each carries its
+	 * base row number, which is what a projection is joined back on.
+	 */
+	if (keep)
+		return;
 	MemoryContextReset(w->rowCtx);
 	w->nrows = 0;
 }
@@ -3632,7 +3688,7 @@ append_proj_row(PgColumnarProjWriter *w, Relation rel, TupleDesc tableDesc,
 	MemoryContextSwitchTo(oldContext);
 
 	if (w->nrows >= w->stripeRowLimit)
-		flush_proj_writer(w, rel);
+		flush_proj_writer(w, rel, false);
 }
 
 /*
@@ -3738,12 +3794,45 @@ PgColumnarBackfillProjection(Relation rel, const PgColumnarProjection *proj)
 		append_proj_row(w, rel, tableDesc, rowNumber, values, nulls);
 	PgColumnarEndRead(readState);
 
-	flush_proj_writer(w, rel);
+	flush_proj_writer(w, rel, false);
 }
 
 /* Flush all projection writers hanging off a base write state. */
 static void
 flush_ws_projections(PgColumnarWriteState *ws)
+{
+	flush_ws_projections_ext(ws, false);
+}
+
+/* Whether any projection writer holds buffered rows. */
+static bool
+ws_has_projection_rows(PgColumnarWriteState *ws)
+{
+	ListCell   *lc;
+
+	foreach(lc, ws->projWriters)
+		if (((PgColumnarProjWriter *) lfirst(lc))->nrows > 0)
+			return true;
+	return false;
+}
+
+/* Drop every projection writer's kept rows (#1360). */
+static void
+reset_ws_projections(PgColumnarWriteState *ws)
+{
+	ListCell   *lc;
+
+	foreach(lc, ws->projWriters)
+	{
+		PgColumnarProjWriter *w = (PgColumnarProjWriter *) lfirst(lc);
+
+		MemoryContextReset(w->rowCtx);
+		w->nrows = 0;
+	}
+}
+
+static void
+flush_ws_projections_ext(PgColumnarWriteState *ws, bool keep)
 {
 	ListCell   *lc;
 	Relation	rel;
@@ -3757,7 +3846,7 @@ flush_ws_projections(PgColumnarWriteState *ws)
 
 	rel = table_open(ws->relid, RowExclusiveLock);
 	foreach(lc, ws->projWriters)
-		flush_proj_writer((PgColumnarProjWriter *) lfirst(lc), rel);
+		flush_proj_writer((PgColumnarProjWriter *) lfirst(lc), rel, keep);
 	table_close(rel, RowExclusiveLock);
 }
 
@@ -3797,22 +3886,65 @@ PgColumnarResetProjectionWritersForRelation(Oid relid)
  * PgColumnarFlushWriteStateForRelation
  *		Flush any pending partial stripe for a single relation. Used at scan
  *		start so data written earlier in this transaction is persisted.
+ *
+ *		A BUFFER AN ENCLOSING SUBTRANSACTION OWNS IS WRITTEN AND KEPT (#1360). A
+ *		read inside a plpgsql EXCEPTION block must see the rows the enclosing
+ *		statement has buffered so far, as heap's does, so they are written. But
+ *		the catalog rows go under the block's subtransaction, and its rollback
+ *		took them: an INSERT ... SELECT f(g) of 3000 rows, where f's block read
+ *		the table and raised, kept one row. So the buffer is kept, with its
+ *		reservation, until that subtransaction resolves (see flushedUnder). The
+ *		enclosing statement cannot add a row meanwhile: it runs only in the
+ *		owner, and the block is below it. Once written, a kept buffer is not
+ *		written again for a deeper read: the rows are already visible there.
  */
 void
 PgColumnarFlushWriteStateForRelation(Oid relid)
 {
+	SubTransactionId current = GetCurrentSubTransactionId();
 	ListCell   *lc;
 
 	foreach(lc, PgColumnarWriteStates)
 	{
 		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
+		bool		keep = (writeState->subid != current);
 
 		if (writeState->relid != relid)
 			continue;
+		if (writeState->flushedUnder != InvalidSubTransactionId)
+			continue;
+		if (keep && writeState->stripeRowCount == 0 &&
+			!ws_has_projection_rows(writeState))
+			continue;
 		if (writeState->stripeRowCount > 0)
-			pgcolumnar_flush_row_group(writeState);
-		flush_ws_projections(writeState);
+			flush_row_group(writeState, keep);
+		flush_ws_projections_ext(writeState, keep);
+		if (keep)
+		{
+			writeState->flushedUnder = current;
+			writeState->eagerFlush = true;
+		}
 	}
+}
+
+/*
+ * PgColumnarWriteStateAfterAppend
+ *		Called after a row and its projection fan-out are buffered. A buffer in
+ *		eager mode (see eagerFlush) is written out once, under its owner, which is
+ *		the current subtransaction whenever the owner appends; it then buffers as
+ *		before until the next read below the owner.
+ */
+void
+PgColumnarWriteStateAfterAppend(PgColumnarWriteState *writeState)
+{
+	if (!writeState->eagerFlush ||
+		writeState->subid != GetCurrentSubTransactionId() ||
+		writeState->flushedUnder != InvalidSubTransactionId)
+		return;
+	if (writeState->stripeRowCount > 0)
+		pgcolumnar_flush_row_group(writeState);
+	flush_ws_projections(writeState);
+	writeState->eagerFlush = false;
 }
 
 /*
@@ -3859,6 +3991,8 @@ PgColumnarFlushAllPendingWrites(void)
 	{
 		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
+		/* every subtransaction has resolved by now, and with it every kept buffer */
+		Assert(writeState->flushedUnder == InvalidSubTransactionId);
 		pgcolumnar_flush_row_group(writeState);
 		flush_ws_projections(writeState);
 	}
@@ -3889,6 +4023,7 @@ PgColumnarFlushPendingWritesOfSubXact(SubTransactionId subid)
 			continue;
 		pgcolumnar_flush_row_group(writeState);
 		flush_ws_projections(writeState);
+		writeState->eagerFlush = false;
 	}
 }
 
@@ -3926,8 +4061,17 @@ PgColumnarWriteStateDiscardSubXact(SubTransactionId subid)
 	{
 		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
-		if (writeState->subid != subid)
-			kept = lappend(kept, writeState);
+		if (writeState->subid == subid)
+			continue;
+
+		/*
+		 * An enclosing statement's buffer this subtransaction wrote out (#1360):
+		 * the abort takes the catalog rows, and the kept buffer, reservation and
+		 * row numbers included, is written again under its owner.
+		 */
+		if (writeState->flushedUnder == subid)
+			writeState->flushedUnder = InvalidSubTransactionId;
+		kept = lappend(kept, writeState);
 	}
 	MemoryContextSwitchTo(oldContext);
 
@@ -3951,5 +4095,22 @@ PgColumnarWriteStatePromoteSubXact(SubTransactionId subid, SubTransactionId pare
 
 		if (writeState->subid == subid)
 			writeState->subid = parent;
+
+		/*
+		 * A kept buffer (#1360) whose catalog rows now belong to its owner is
+		 * done with: drop it. Committed into a subtransaction still below the
+		 * owner, it waits for that one instead, since that one can still abort.
+		 */
+		if (writeState->flushedUnder == subid)
+		{
+			if (parent == writeState->subid)
+			{
+				reset_stripe(writeState);
+				reset_ws_projections(writeState);
+				writeState->flushedUnder = InvalidSubTransactionId;
+			}
+			else
+				writeState->flushedUnder = parent;
+		}
 	}
 }

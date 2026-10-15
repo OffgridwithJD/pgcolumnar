@@ -1141,6 +1141,7 @@ pgcolumnar_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
 	/* fan the row out to every additional projection of this table (gap 26) */
 	PgColumnarProjectionFanoutRow(rel, writeState, rowNumber, slot->tts_values,
 								slot->tts_isnull);
+	PgColumnarWriteStateAfterAppend(writeState);	/* #1403 review */
 
 	/*
 	 * A new row makes its block not all-visible; clear any VM bit so an
@@ -1176,6 +1177,7 @@ pgcolumnar_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
 									 slots[i]->tts_isnull);
 		PgColumnarProjectionFanoutRow(rel, writeState, rowNumber,
 									slots[i]->tts_values, slots[i]->tts_isnull);
+		PgColumnarWriteStateAfterAppend(writeState);	/* #1403 review */
 		PgColumnarVMClearForRow(rel, rowNumber);	/* gap 28: block changed */
 		PgColumnarRowNumberToItemPointer(rowNumber, &slots[i]->tts_tid);
 		slots[i]->tts_tableOid = RelationGetRelid(rel);
@@ -2287,6 +2289,7 @@ pgcolumnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
 	 */
 	PgColumnarProjectionFanoutRow(rel, writeState, rowNumber, slot->tts_values,
 								slot->tts_isnull);
+	PgColumnarWriteStateAfterAppend(writeState);	/* #1403 review */
 
 	/*
 	 * The new row version makes its block not all-visible, exactly as a plain

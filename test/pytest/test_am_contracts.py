@@ -212,6 +212,119 @@ END $$""")
                 "an outer delete survives an aborted inner block, as on heap")
 
 
+def test_a_read_inside_an_aborted_inner_block_keeps_the_outer_statements_rows(pgc_conn, expect):
+    """A read of the table inside the block must see the rows the outer INSERT has
+    buffered so far, as heap's does, so it flushes them. That flush's catalog rows
+    belonged to the block's subtransaction, and its rollback took the outer rows with
+    them (#1360). The read's answer is pinned too, so a fix cannot trade the lost rows
+    for a read that misses them. Every arm runs on heap as well; the columnar answer
+    must be heap's. HOW: abort, nested (a block that commits into one that raises),
+    and commit (the control)."""
+    with pgc_conn.cursor() as cur:
+        cur.execute("""CREATE FUNCTION sx_rd(i int, t text, how text) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE n int; c text; sq text;
+BEGIN
+    IF how = 'once' AND i <> 2 THEN RETURN NULL; END IF;
+    BEGIN
+        IF how = 'delself' THEN
+            c := current_setting('pgcolumnar.enable_custom_scan'); sq := current_setting('enable_seqscan');
+            PERFORM set_config('pgcolumnar.enable_custom_scan', 'off', true), set_config('enable_seqscan', 'off', true);
+            EXECUTE format('DELETE FROM %s WHERE id = %s', t, i + 1);
+            PERFORM set_config('pgcolumnar.enable_custom_scan', c, true), set_config('enable_seqscan', sq, true);
+        END IF;
+        IF how = 'nested' THEN
+            BEGIN
+                EXECUTE format('SELECT count(*) FROM %s', t) INTO n;
+            EXCEPTION WHEN no_data_found THEN NULL;
+            END;
+        ELSE
+            EXECUTE format('SELECT count(*) FROM %s', t) INTO n;
+        END IF;
+        IF how <> 'commit' THEN PERFORM 1 / 0; END IF;
+    EXCEPTION WHEN division_by_zero THEN NULL;
+    END;
+    RETURN n;
+END $$""")
+        for how in ("abort", "nested", "commit"):
+            for am in ("pgcolumnar", "heap"):
+                t = f"rd_{how}_{am}"
+                cur.execute(f"CREATE TABLE {t} (id int PRIMARY KEY, seen int) USING {am}")
+                cur.execute(f"INSERT INTO {t} SELECT g, sx_rd(g, '{t}', '{how}') FROM generate_series(1, 1000) g")
+
+    def shape(t):
+        return _one(pgc_conn, f"SELECT count(*) || '|' || sum(id) FROM {t}")
+
+    def seen(t):
+        return str(_one(pgc_conn, f"SELECT sum(seen) FROM {t}"))
+
+    expect.text(shape("rd_abort_pgcolumnar"), shape("rd_abort_heap"),
+                "an outer insert survives a read of its own table inside an aborted inner block, as on heap")
+    expect.text(seen("rd_abort_pgcolumnar"), seen("rd_abort_heap"),
+                "and that read saw the rows the outer statement had inserted so far, as on heap")
+    with pgc_conn.cursor() as cur:
+        cur.execute("SET enable_seqscan = off")
+        cur.execute("SET enable_bitmapscan = off")
+        everything = "SELECT count(*) FROM rd_abort_pgcolumnar WHERE id BETWEEN 1 AND 1000"
+        plan = "\n".join(r[0] for r in cur.execute(f"EXPLAIN (COSTS OFF) {everything}").fetchall())
+        found = cur.execute(everything).fetchone()[0]
+        cur.execute("RESET enable_seqscan")
+        cur.execute("RESET enable_bitmapscan")
+    expect.text(f"{'index' if 'Index' in plan else 'other'}|{found}", "index|1000",
+                "and the primary key finds every outer row by index")
+    expect.text(f"{shape('rd_nested_pgcolumnar')}|{seen('rd_nested_pgcolumnar')}",
+                f"{shape('rd_nested_heap')}|{seen('rd_nested_heap')}",
+                "an outer insert survives a read in a nested block that commits into an aborted one, as on heap")
+    expect.text(f"{shape('rd_commit_pgcolumnar')}|{seen('rd_commit_pgcolumnar')}",
+                f"{shape('rd_commit_heap')}|{seen('rd_commit_heap')}",
+                "a read inside an inner block that commits keeps every outer row once, as on heap")
+    # The same for the delete marks an outer DELETE has buffered: the read flushes
+    # them, and the block's rollback took them away, so the deleted rows came back.
+    with pgc_conn.cursor() as cur:
+        for am in ("pgcolumnar", "heap"):
+            t = f"rd_del_{am}"
+            cur.execute(f"CREATE TABLE {t} (id int, seen int) USING {am}")
+            cur.execute(f"INSERT INTO {t} SELECT g, 0 FROM generate_series(1, 1000) g")
+            cur.execute(f"DELETE FROM {t} WHERE id % 2 = 0 AND sx_rd(id, '{t}', 'abort') IS NOT NULL")
+    expect.text(shape("rd_del_pgcolumnar"), shape("rd_del_heap"),
+                "an outer delete survives a read of its own table inside an aborted inner block, as on heap")
+    # The block deletes the next row by index before its read. That path writes no
+    # enclosing marks first, so the block's own mark is on disk when the read writes
+    # the outer marks; it must not be carried into them and written again after the abort.
+    with pgc_conn.cursor() as cur:
+        for am in ("pgcolumnar", "heap"):
+            t = f"rd_ds_{am}"
+            cur.execute(f"CREATE TABLE {t} (id int PRIMARY KEY, seen int) USING {am}")
+            cur.execute(f"INSERT INTO {t} SELECT g, 0 FROM generate_series(1, 1000) g")
+            cur.execute(f"DELETE FROM {t} WHERE id % 2 = 0 AND sx_rd(id, '{t}', 'delself') IS NOT NULL")
+    expect.text(shape("rd_ds_pgcolumnar"), shape("rd_ds_heap"),
+                "and a delete the aborted block made itself stays undone, as on heap")
+    # THE COST IS LINEAR IN THE ROWS (#1403 review). Kept as one growing stripe, each
+    # abort's re-write covered every earlier row: at twice the rows, about four times
+    # the file. The size at 2n must stay under 2.5 times the size at n.
+    with pgc_conn.cursor() as cur:
+        for sz in (400, 800):
+            cur.execute(f"CREATE TABLE rd_sz_{sz} (id int, seen int, pad text) USING pgcolumnar")
+            cur.execute(f"INSERT INTO rd_sz_{sz} SELECT g, sx_rd(g, 'rd_sz_{sz}', 'abort'),"
+                        " md5(g::text) || md5((g + 1)::text) || md5((g + 2)::text)"
+                        f" FROM generate_series(1, {sz}) g")
+    expect.text(_one(pgc_conn, "SELECT (SELECT count(*) FROM rd_sz_400) || '|' || (SELECT count(*) FROM rd_sz_800)"
+                               " || '|' || CASE WHEN pg_relation_size('rd_sz_800') < 2.5 * pg_relation_size('rd_sz_400')"
+                               " THEN 'linear' ELSE 'x' || round(pg_relation_size('rd_sz_800')::numeric"
+                               " / pg_relation_size('rd_sz_400'), 1) END"),
+                "400|800|linear",
+                "a read in an aborted block at twice the rows writes under 2.5 times the file, with every row kept")
+    # And one read costs one write, not the rest of the statement (#1403 review): eager
+    # until the statement ended, one early read made every later row its own group.
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE rd_once (id int, seen int, pad text) USING pgcolumnar")
+        cur.execute("INSERT INTO rd_once SELECT g, sx_rd(g, 'rd_once', 'once'), md5(g::text)"
+                    " FROM generate_series(1, 5000) g")
+    groups = _one(pgc_conn, "SELECT count(*) FROM pgcolumnar.row_group"
+                            " WHERE storage_id = pgcolumnar.get_storage_id('rd_once')")
+    expect.text(f"{_one(pgc_conn, 'SELECT count(*) FROM rd_once')}|{'few' if groups <= 3 else f'{groups} groups'}",
+                "5000|few", "a single read early in a 5000-row insert keeps every row in at most 3 row groups")
+
+
 def test_an_insert_racing_an_uncommitted_delete_of_its_key(pgc_cluster, pgc_conn, expect):
     """Session 1 removes key k and has not committed; session 2 inserts k (#1341).
 
