@@ -665,4 +665,6 @@ guard_tests 433
 # test_rollup.py, by collection over the cluster files on this tree.
 # cluster_tests 563 -> 564 for #1377's test_rollup_dump_and_restore in test_rollup.py,
 # by collection over the cluster files on this tree.
-cluster_tests 564
+# cluster_tests 564 -> 565 for #1341 item 19's test_a_type_change_without_a_rewrite in
+# test_collation_change.py, by collection over the cluster files on this tree.
+cluster_tests 565
