@@ -2317,4 +2317,15 @@ suites_not_covered 231
 #     never         2272 + 0 = 2272
 #     dated          695 + 1 = 696
 #     2272 + 696 == 2968
-checks_never_observed_red 2272
+#
+# am_contracts' older-snapshot arm ordered by events, not sleeps (jdatcmd): 2272 ->
+# 2273. One premise enters, that the older snapshot predates the delete, from
+# five-major runs (28/28 on each of 15-19). A premise is never dated, by #1236.
+# The arm it guards stays dated: an index build that skips deleted rows again
+# reddens it on PG17 under the new ordering.
+#
+#     ledger rows   2968 + 1 = 2969
+#     never         2272 + 1 = 2273
+#     dated          696 + 0 = 696
+#     2273 + 696 == 2969
+checks_never_observed_red 2273

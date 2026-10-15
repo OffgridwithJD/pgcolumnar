@@ -30,6 +30,7 @@ am_contracts	am_contracts	and the primary key still refuses a duplicate of a res
 am_contracts	am_contracts	and the unique index answers the key with that one row	15;16;17;18;19	never	-
 am_contracts	am_contracts	premise: the conflict table holds ten rows	15;16;17;18;19	never	-
 am_contracts	am_contracts	premise: the index exists and is valid	15;16;17;18;19	never	-
+am_contracts	am_contracts	premise: the older snapshot was taken before the delete	15;16;17;18;19	never	-
 am_contracts	am_contracts	premise: the older snapshot's lookup is an index scan	15;16;17;18;19	never	-
 am_contracts	am_contracts	premise: the racing sessions contended for keys	15;16;17;18;19	never	-
 am_contracts	am_contracts	premise: the truncate table holds 5000 rows	15;16;17;18;19	never	-

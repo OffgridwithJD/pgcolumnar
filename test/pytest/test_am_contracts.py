@@ -378,6 +378,7 @@ def test_an_index_built_after_a_delete_serves_an_older_snapshot(pgc_cluster, pgc
             oc.execute(f'SET search_path TO "{schema}"')
             oc.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             oc.execute("SELECT count(*) FROM ib")
+            before = oc.fetchone()[0]
             with pgc_conn.cursor() as cur:
                 cur.execute("DELETE FROM ib WHERE id = 4242")
                 cur.execute("CREATE INDEX ib_id ON ib (id)")
@@ -390,6 +391,7 @@ def test_an_index_built_after_a_delete_serves_an_older_snapshot(pgc_cluster, pgc
         old.rollback()
     finally:
         old.close()
+    expect.num(before, 10000, "premise: the older snapshot was taken before the delete")
     expect.text(str(_one(pgc_conn, "SELECT indisvalid FROM pg_index WHERE indexrelid = 'ib_id'::regclass")),
                 "True", "premise: the index exists and is valid")
     expect.num(len(re.findall(r"Index (Only )?Scan using ib_id", plan)), 1,

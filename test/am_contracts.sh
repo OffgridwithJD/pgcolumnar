@@ -280,17 +280,41 @@ check "an insert of a key an uncommitted UPDATE moved away fails when the update
 # as on heap, which indexes rows not yet dead to every snapshot.
 psql_run "CREATE TABLE ib (id int, v int) USING pgcolumnar;"
 psql_run "INSERT INTO ib SELECT g, g FROM generate_series(1, 10000) g;"
+# ORDERED BY EVENTS, NOT SLEEPS. Session 1 used to sleep four seconds and assume the
+# DELETE and the index build fitted inside them; on a loaded box they did not, the
+# plan was taken before the index existed, and the premise read 0 (PG16, 2026-10-15).
+# Now a gate session holds an advisory lock. Session 1 takes its snapshot, names
+# itself, and queues for that lock; the script waits for the name, deletes, builds,
+# and only then ends the gate, so session 1 plans after the index exists.
 _ib_out="$PGC_WORKDIR/ib_rr.out"
+ib_wait_for() {	# ib_wait_for APPLICATION_NAME -> its pid, once it has named itself
+	local i pid=""
+	for i in $(seq 1 300); do
+		pid="$(q "SELECT pid FROM pg_stat_activity WHERE application_name = '$1'")"
+		[ -n "$pid" ] && break
+		sleep 0.1
+	done
+	echo "$pid"
+}
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+	-c "SELECT pg_advisory_lock(4242); SET application_name = 'ib_gate'; SELECT pg_sleep(600);" >/dev/null 2>&1 &
+_ib_gate=$!
+_ib_gate_pid="$(ib_wait_for ib_gate)"
 env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq -v ON_ERROR_STOP=1 \
-	-c "BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM ib; SELECT pg_sleep(4);
+	-c "BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM ib; SET application_name = 'ib_snap';
+	    SELECT pg_advisory_lock_shared(4242);
 	    SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off;
 	    EXPLAIN (COSTS OFF) SELECT count(*) FROM ib WHERE id = 4242;
 	    SELECT 'rows:' || count(*) FROM ib WHERE id = 4242; COMMIT;" > "$_ib_out" 2>&1 &
 _ib_s1=$!
-sleep 1
+_ib_snap_pid="$(ib_wait_for ib_snap)"
 psql_run "DELETE FROM ib WHERE id = 4242;"
 psql_run "CREATE INDEX ib_id ON ib (id);"
+q "SELECT pg_terminate_backend(${_ib_gate_pid:-0})" >/dev/null
+wait "$_ib_gate" 2>/dev/null
 wait "$_ib_s1"
+check "premise: the older snapshot was taken before the delete" \
+	"$([ -n "$_ib_gate_pid" ] && [ -n "$_ib_snap_pid" ] && head -1 "$_ib_out" || echo "no (gate ${_ib_gate_pid:-none}, snapshot ${_ib_snap_pid:-none})")" "10000"
 check "premise: the index exists and is valid" \
 	"$(q "SELECT indisvalid FROM pg_index WHERE indexrelid = 'ib_id'::regclass")" "t"
 check "premise: the older snapshot's lookup is an index scan" \
