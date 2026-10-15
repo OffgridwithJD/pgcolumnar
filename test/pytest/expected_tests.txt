@@ -689,4 +689,5 @@ guard_tests 435
 # test_rollup.py, by collection over the cluster files on this tree.
 # cluster_tests 577 -> 578 for #1341's test_statement_self_visibility.py, one test, by collection
 # over the cluster files on this tree.
-cluster_tests 578
+# cluster_tests 578 -> 579 for #1341's test_the_documented_refusals_change_nothing in
+cluster_tests 579

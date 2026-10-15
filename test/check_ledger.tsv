@@ -13,6 +13,10 @@ alter_table_scans	alter_table_scans	and the rewrite kept the live rows and not t
 alter_table_scans	alter_table_scans	the deleted rows are gone from both tables, which hold the same rows	15;16;17;18;19	2026-10-15	every scan returns deleted rows, the reader's delete filter disabled (src/columnar_reader.c)
 alter_table_scans	alter_table_scans	the lookup of id 1 is an index scan on the primary key	15;16;17;18;19	2026-10-15	the index build marks every row alive, deleted ones included (src/columnar_tableam.c)
 alter_table_scans	alter_table_scans	the primary key still finds id 1 once, through the index, after both rewrites	15;16;17;18;19	never	-
+am_contracts	am_contracts	ALTER TABLE ... SET TABLESPACE is refused (0A000), and the table stays where it was with its rows	15;16;17;18;19	2026-10-15	relation copy returning without copying (SET TABLESPACE)
+am_contracts	am_contracts	ALTER TABLE ... SET UNLOGGED is refused (0A000), and the table stays logged with its rows	15;16;17;18;19	2026-10-15	the storage hook accepting an unlogged columnar table
+am_contracts	am_contracts	CREATE INDEX CONCURRENTLY is refused (0A000), and the index it leaves is marked invalid	15;16;17;18;19	2026-10-15	the concurrent index validate scan doing nothing
+am_contracts	am_contracts	CREATE UNLOGGED TABLE ... USING pgcolumnar is refused (0A000) and leaves no table	15;16;17;18;19	2026-10-15	the storage hook accepting an unlogged columnar table
 am_contracts	am_contracts	ON CONFLICT DO NOTHING skips the duplicate and inserts the new row	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	ON CONFLICT DO UPDATE is refused as unsupported (0A000), and changes nothing	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341
 am_contracts	am_contracts	ON CONFLICT DO UPDATE with no conflicting row inserts it	15;16;17;18;19	2026-10-14	speculative insert refused as unsupported, as before #1341

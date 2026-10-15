@@ -6925,6 +6925,7 @@ THE WITHDRAWAL IS REACHED ONLY BY A RACE. When one session holds a key uncommitt
 | `test_an_insert_racing_an_uncommitted_delete_of_its_key` | an insert of a key whose delete (or key-changing update) is uncommitted waits, then fails with 23505 if the delete rolls back and succeeds if it commits: never two rows with the key. Before #1341's fix the rollback left two |
 | `test_an_index_built_after_a_delete_serves_an_older_snapshot` | a REPEATABLE READ snapshot from before a committed DELETE still finds the row through an index built after it (an Index Scan, asserted), and a new snapshot does not; a UNIQUE index still builds over a key whose other holder is deleted. Before #1341's fix the old snapshot's lookup found 0 |
 | `test_reindex_reclaims_the_entries_of_rows_no_snapshot_sees` | after a committed delete of 9 rows in 10, with no older snapshot, `REINDEX` takes the index under half its size, as it does on heap, and the index still finds the 10,000 live rows (#1407) |
+| `test_the_documented_refusals_change_nothing` | `CREATE UNLOGGED TABLE` and `SET UNLOGGED` are refused (`0A000`) and leave nothing changed; `SET TABLESPACE` is refused and the table stays where it was; `CREATE INDEX CONCURRENTLY` is refused and leaves its index marked invalid, as core does (#1341 items 44, 51, 77) |
 
 ## 111. test_objstore_credentials.py: object-store credentials live on a user mapping, and the environment is a privilege
 
