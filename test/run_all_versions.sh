@@ -134,6 +134,7 @@ SUITES=(
 	inheritance
 	int8_agg_int128
 	isolation
+	large_values
 	latest_reading
 	local_open_race_free
 	logical_decoding_cdc_recipe

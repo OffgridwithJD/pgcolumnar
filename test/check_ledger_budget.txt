@@ -2362,4 +2362,17 @@ suites_not_covered 231
 #     never         2278 + 0 = 2278
 #     dated          706 + 8 = 714
 #     2278 + 714 == 2992
-checks_never_observed_red 2278
+#
+# #1341, megabyte-scale values are stored exactly (jdatcmd): 2278 -> 2281.
+# large_values enters with all 6 checks from five-major runs (5/5 plus the opt-in arm
+# skipped, on each of 15-19). Three are dated on PG17 by one mutant: a TOASTed value
+# stored as its pointer, both the write path and the encoder skipping
+# pg_detoast_datum for an external value. The other three arrive never: two premises
+# and the opt-in chunk-over-1-GB arm, which passed when run by hand on PG17
+# (PGC_RUN_OVER_1GB=1: 54000, nothing committed, the server up).
+#
+#     ledger rows   2992 + 6 = 2998
+#     never         2278 + 3 = 2281
+#     dated          714 + 3 = 717
+#     2281 + 717 == 2998
+checks_never_observed_red 2281
