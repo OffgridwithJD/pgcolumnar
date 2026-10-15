@@ -1152,6 +1152,25 @@ def expect(request):
     _RECORDERS.pop(request.node.nodeid, None)
 
 
+def _refuse_set(proxy, attr, value, inner):
+    """__setattr__ for the watched proxies: their own state is set, anything else refused.
+
+    The proxies forward READS through __getattr__, so without this a setting such
+    as `pgc_conn.autocommit = False` lands on the proxy, the real object keeps its
+    value, and the test goes on as if it had changed (#1420). Refused rather than
+    forwarded, so a test that wants a transaction says so with BEGIN and ROLLBACK
+    or opens a connection of its own, as the existing twins do.
+    """
+    if attr.startswith("_"):
+        object.__setattr__(proxy, attr, value)
+        return
+    raise AttributeError(
+        f"{type(proxy).__name__} does not forward setting {attr!r}: the {inner} "
+        f"would keep its value while the test went on as if it had changed (#1420). "
+        f"For a transaction, run BEGIN and ROLLBACK, or open a connection of your own."
+    )
+
+
 class _WatchedCursor:
     """A psycopg cursor that reports every write it runs to the guard.
 
@@ -1188,6 +1207,9 @@ class _WatchedCursor:
     def __getattr__(self, attr):
         return getattr(self._cur, attr)
 
+    def __setattr__(self, attr, value):
+        _refuse_set(self, attr, value, "cursor")
+
     def __iter__(self):
         return iter(self._cur)
 
@@ -1219,6 +1241,9 @@ class _WatchedConnection:
 
     def __getattr__(self, attr):
         return getattr(self._conn, attr)
+
+    def __setattr__(self, attr, value):
+        _refuse_set(self, attr, value, "connection")
 
     def __enter__(self):
         self._conn.__enter__()

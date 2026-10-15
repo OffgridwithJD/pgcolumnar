@@ -283,7 +283,9 @@
 # premise is refused, and its control), by collection over the NO_CLUSTER files on this tree.
 # guard_tests 429 -> 433 for #1382's test_every_suite_job_installs_the_extensions.py, four
 # tests, the twin of selftest part 640, by collection over the NO_CLUSTER files.
-guard_tests 433
+# guard_tests 433 -> 435 for #1420's two arms in test_writes_wrote_rows.py (a setting
+# on a watched connection or cursor is refused), by collection over NO_CLUSTER.
+guard_tests 435
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -669,4 +671,6 @@ guard_tests 433
 # test_collation_change.py, by collection over the cluster files on this tree.
 # cluster_tests 565 -> 566 for #1360's test_a_read_inside_an_aborted_inner_block_keeps_the_outer_statements_rows
 # in test_am_contracts.py, by collection over the cluster files on this tree.
-cluster_tests 566
+# cluster_tests 566 -> 567 for #1420's wiring arm in test_connection.py, by collection
+# over the cluster files on this tree.
+cluster_tests 567

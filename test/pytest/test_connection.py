@@ -334,6 +334,22 @@ def test_the_acknowledgement_is_by_cursor_against_the_real_driver(pgc_conn, expe
         expect.wrote(first, 0, "so name the first explicitly too")
 
 
+def test_setting_autocommit_on_the_connection_the_tests_use_is_refused(pgc_conn, expect):
+    """The wiring arm for #1420: the stub arms in test_writes_wrote_rows.py prove the
+    wrapper refuses, and this proves `pgc_conn` IS that wrapper, against the real
+    driver. Before the fix the assignment succeeded on the wrapper and the server
+    went on committing every statement.
+    """
+    try:
+        pgc_conn.autocommit = False
+        outcome = "set"
+    except AttributeError as exc:
+        outcome = f"refused: {exc}"
+    expect.text(outcome.split(":")[0], "refused",
+                "setting autocommit on pgc_conn is refused, not silently ignored")
+    expect.text(str(pgc_conn.autocommit), "True", "and pgc_conn is still in autocommit")
+
+
 def test_the_block_compression_default_is_pinned_to_its_measurement(pgc_conn, expect):
     """#890: zstd:3 stays the default until a measurement says otherwise.
 
