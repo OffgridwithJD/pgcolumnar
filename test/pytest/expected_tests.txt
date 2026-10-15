@@ -698,4 +698,5 @@ guard_tests 435
 # in test_partition_rows.py, by collection over the cluster files on this tree.
 # cluster_tests 569 -> 570 for #1341's test_prepared_across_sessions.py, one test, by
 # collection over the cluster files on this tree (stacked on #1422).
-cluster_tests 585
+# cluster_tests 585 -> 586 for #1341's test_maintenance_crash.py, one test, by collection
+cluster_tests 586

@@ -140,6 +140,7 @@ SUITES=(
 	logical_decoding_cdc_recipe
 	logical_decoding_source
 	logical_subscriber
+	maintenance_crash
 	maintenance_due
 	maintenance_rollback
 	native_agg

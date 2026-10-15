@@ -2493,4 +2493,19 @@ suites_not_covered 230
 #     never         2308 + 11 = 2319
 #     dated          758 + 1 = 759
 #     2319 + 759 == 3078
-checks_never_observed_red 2319
+#
+# #1341, a crash part-way through maintenance loses nothing (jdatcmd): 2319 ->
+# 2338. maintenance_crash enters with all 24 checks from five-major runs (24/24 on
+# each of 15-19). Five are dated on PG17 by two mutants:
+#   - data pages written without WAL: the committed-crash arms of compact_rewrite,
+#     recluster and vacuum;
+#   - compact_rewrite rewriting nothing: its two did-work arms, uncommitted and
+#     committed, which the review of #1423 asked for, since a function that changes
+#     nothing is trivially crash-safe (OffgridwithJD).
+# The other nineteen arrive never.
+#
+#     ledger rows   3078 + 24 = 3102
+#     never         2319 + 19 = 2338
+#     dated          759 + 5 = 764
+#     2338 + 764 == 3102
+checks_never_observed_red 2338
