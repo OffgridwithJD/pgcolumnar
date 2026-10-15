@@ -273,3 +273,54 @@ def test_acknowledging_both_identical_zeros_passes(expect, pytester):
         expect.wrote(second, 0, "and so did the second")
     """)
     expect.outcomes(result, "naming both zeros passes", passed=1, failed=0)
+
+
+class _Conn:
+    """A connection's one setting this guard reads, and the cursor it hands out."""
+
+    def __init__(self):
+        self.autocommit = True
+
+    def cursor(self):
+        return _Cur("SELECT 0", 0)
+
+
+def _try_set(obj, attr, value):
+    """Set `attr` on `obj` -> 'set', or 'refused: <message>'."""
+    try:
+        setattr(obj, attr, value)
+    except AttributeError as exc:
+        return f"refused: {exc}"
+    return "set"
+
+
+def test_a_setting_on_the_watched_connection_is_refused_not_dropped(expect, request):
+    """Setting an attribute on the wrapper must not pass for setting it on the connection.
+
+    The wrapper forwards reads, so `pgc_conn.autocommit` reads the real value. With
+    no `__setattr__`, `pgc_conn.autocommit = False` made a new attribute on the
+    wrapper and left the real connection in autocommit, so each statement committed
+    and `rollback()` undid nothing (#1420). Refusing it makes the mistake loud.
+    """
+    real = _Conn()
+    watched = pgc_vacuity.watch_writes(real, request.node.nodeid + "::conn")
+    expect.text(str(watched.autocommit), "True",
+                "premise: a setting read through the watched connection is the real one")
+    outcome = _try_set(watched, "autocommit", False)
+    expect.text(outcome.split(":")[0], "refused",
+                "setting autocommit on the watched connection is refused, not kept on the wrapper")
+    expect.text("yes" if "autocommit" in outcome and "BEGIN" in outcome else outcome, "yes",
+                "and the refusal names the attribute and what to do instead")
+    expect.text(str(real.autocommit), "True", "and the real connection is unchanged")
+
+
+def test_a_setting_on_a_watched_cursor_is_refused_not_dropped(expect, request):
+    """The same for the cursor proxy: `cur.row_factory = ...` would be dropped too."""
+    watched = pgc_vacuity.watch_writes(_Conn(), request.node.nodeid + "::cur").cursor()
+    expect.text(type(watched).__name__, "_WatchedCursor",
+                "premise: the connection hands out a watched cursor")
+    outcome = _try_set(watched, "row_factory", None)
+    expect.text(outcome.split(":")[0], "refused",
+                "setting an attribute on a watched cursor is refused, not kept on the wrapper")
+    expect.text("yes" if "row_factory" in outcome else outcome, "yes",
+                "and the refusal names the attribute")

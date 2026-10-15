@@ -1266,6 +1266,7 @@ written.
 | `test_the_cluster_refuses_a_foreign_server` | the identity check can return False |
 | `test_the_connection_the_tests_use_is_watched` | writes through `pgc_conn` reach the zero-row guard, on both the connection and a handed-out cursor |
 | `test_the_acknowledgement_is_by_cursor_against_the_real_driver` | the write is stamped on the object the caller holds, which a stub cannot prove |
+| `test_setting_autocommit_on_the_connection_the_tests_use_is_refused` | the wiring arm for #1420: `pgc_conn` itself refuses `autocommit = False` and stays in autocommit, against the real driver |
 
 Two of these deserve their reasoning stated.
 
@@ -2281,6 +2282,8 @@ separately, so a reader sees a green test beside an error.
 | `test_wrote_refuses_a_statement_that_is_not_a_write` | `expect.wrote` on a `SELECT 0` is refused, not compared |
 | `test_the_acknowledgement_names_one_write_and_not_its_twin` | naming one zero does not acknowledge a different identical zero |
 | `test_acknowledging_both_identical_zeros_passes` | the control for that arm: naming both is legitimate |
+| `test_a_setting_on_the_watched_connection_is_refused_not_dropped` | setting `autocommit` on the watched connection raises, naming the attribute and BEGIN/ROLLBACK, and the real connection keeps its value (#1420) |
+| `test_a_setting_on_a_watched_cursor_is_refused_not_dropped` | the same refusal for an attribute set on a watched cursor |
 
 ### Two properties, two files, on purpose
 
